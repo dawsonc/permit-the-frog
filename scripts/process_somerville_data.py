@@ -82,20 +82,28 @@ OUTPUT_COLS = [
 #  - bare `amp` is a substring of example/camp/ramp, so it must be word-bounded
 #    and digit-prefixed.
 PROJECT_TYPE_PATTERNS = [
-    ("solar_pv", r"solar|photovoltaic|\bpv\b"),
+    ("solar_pv", r"solar|photovoltaic|\bpv\b|kw\s*(?:dc|ac)\b"),
     ("heat_pumps", r"heat[\s-]?pump|mini[\s-]?split|ductless|\bashp\b|air[\s-]?source"),
     (
         "electrical_panel",
         r"(?:electrical|main|sub)[\s-]?panel"
         r"|panel\s+(?:upgrade|change|replace|swap)"
         r"|(?:upgrade|change|replace)\s+(?:the\s+)?panel"
-        r"|service\s+(?:upgrade|change)|upgrade\s+(?:the\s+)?service"
-        r"|\b\d+\s*-?\s*amp\b|load\s+cent(?:er|re)",
+        r"|service\s+(?:upgrade|change)|upgrade\s+(?:the\s+)?service|\bnew\s+service\b"
+        # "200 amp", "200amps", and the "200A service" shorthand. The trailing
+        # `s?` matters: `amp\b` alone silently misses every plural.
+        r"|\b\d+\s*-?\s*amps?\b|\b\d+\s*a\s+(?:service|meter|panel)\b"
+        r"|\bcircuit\s+breaker\b|load\s+cent(?:er|re)",
     ),
     (
         "other_hvac",
         r"furnace|boiler|hvac|air[\s-]?condition|condens[eo]r"
-        r"|\bac\s+unit\b|duct\s?work|\brtu\b",
+        r"|\bac\s+unit\b|\ba\s*/\s*c\b|\bcentral\s+air\b|\bair\s+handler\b"
+        r"|\bheating\s+system\b|\bradiant\s+(?:heat|floor)\b"
+        # Only baseboard *heat* -- bare "baseboard" is carpentry trim in ~53%
+        # of the rows that mention it.
+        r"|baseboard\s+heat|electric\s+baseboard"
+        r"|duct\s?work|\brtu\b",
     ),
 ]
 PROJECT_TYPE_REGEXES = [(label, re.compile(pat)) for label, pat in PROJECT_TYPE_PATTERNS]
