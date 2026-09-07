@@ -22,7 +22,7 @@
       "n": 1474
     },
     "panel": {
-      "label": "Electrical panel",
+      "label": "electrical panel",
       "value": 5000,
       "unit": "",
       "n": 3380
@@ -56,25 +56,6 @@
       "Twin City",
       "Union Square",
       "Winter Hill"
-    ],
-    "trade": [
-      "Building Permit",
-      "Electrical Permit",
-      "Gas Fitting",
-      "Plumbing Permit"
-    ],
-    "status": [
-      "Approved",
-      "Approved/Waiting for Payment",
-      "Closed",
-      "Complete",
-      "Denied",
-      "Expired",
-      "Issued",
-      "Online Application Received",
-      "Revoked",
-      "Under Review",
-      "Withdrawn"
     ]
   }
 }

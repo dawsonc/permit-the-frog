@@ -788,9 +788,17 @@ def verify_deidentified(payload: dict, scrubber: re.Pattern) -> None:
 
 
 def _jsonable(frame: pd.DataFrame) -> list:
-    """Rows as plain lists, with NaN -> None and numpy scalars unwrapped."""
-    return [[None if pd.isna(v) else (v.item() if hasattr(v, "item") else v) for v in row]
-            for row in frame.itertuples(index=False, name=None)]
+    """Rows as plain lists: NaN -> None, numpy scalars unwrapped, and integral
+    floats written as ints. Bucketing makes year_built/res_area/cost whole
+    numbers, and "1920.0" costs two bytes a cell over "1920" for nothing."""
+    def clean(v):
+        if pd.isna(v):
+            return None
+        if hasattr(v, "item"):
+            v = v.item()
+        return int(v) if isinstance(v, float) and v.is_integer() else v
+
+    return [[clean(v) for v in row] for row in frame.itertuples(index=False, name=None)]
 
 
 def build_frontend_data(joined: pd.DataFrame, gdb_path: Path, out_dir: Path,
@@ -802,27 +810,29 @@ def build_frontend_data(joined: pd.DataFrame, gdb_path: Path, out_dir: Path,
     scrubber = build_address_scrubber(addresses)
 
     tagged = joined[joined[list(FRONTEND_FLAGS)].any(axis=1)].copy()
+    # Only what the page actually reads. trade/status/zones/stories/style/
+    # attr_level were emitted for years and rendered by nothing; they cost ~12%
+    # of the gzipped payload. Add a column back here when the page needs it.
     out = pd.DataFrame({
         "date": tagged["application_date"].dt.strftime("%Y-%m"),
-        "trade": tagged["application_type"],
-        "status": tagged["status"],
         "desc": scrub_descriptions(tagged["project_description"], scrubber),
         "cost": tagged["estimated_construction_cost"],
         **{short: tagged[col].astype(int) for col, short in FRONTEND_FLAGS.items()},
         "kw": tagged["solar_kw"],
-        "zones": tagged["zones"],
         "hood": tagged["neighborhood"],
         "contractor": tagged["company_name"],
         "year_built": bucket(tagged["year_built"], YEAR_BUCKET),
         "res_area": bucket(tagged["res_area"], AREA_BUCKET),
-        "stories": tagged["stories"],
-        "style": tagged["style"],
         "prop_class": label_prop_class(tagged["use_code"]),
-        "attr_level": tagged["match_level"],
     })
     # Source order is chronological within parcel, so neighbouring rows are
-    # usually the same building. Shuffle before writing.
+    # usually the same building. Shuffle to break that adjacency, THEN stable-
+    # sort by date: gzip's match window is only ~32 KB (about 100 rows), so
+    # grouping like rows together cuts the wire size by ~11%. The sort is
+    # stable, so order within a month stays shuffled and no parcel adjacency
+    # comes back -- de-identification depends on that, not on global disorder.
     out = out.sample(frac=1, random_state=0).reset_index(drop=True)
+    out = out.sort_values("date", kind="stable", na_position="last").reset_index(drop=True)
 
     permits = {"cols": list(out.columns), "rows": _jsonable(out)}
     verify_deidentified(permits, scrubber)
@@ -855,8 +865,6 @@ def build_frontend_data(joined: pd.DataFrame, gdb_path: Path, out_dir: Path,
         "facets": {
             "prop_class": sorted(out["prop_class"].dropna().unique()),
             "hood": sorted(out["hood"].dropna().unique()),
-            "trade": sorted(out["trade"].dropna().unique()),
-            "status": sorted(out["status"].dropna().unique()),
         },
     }
 
