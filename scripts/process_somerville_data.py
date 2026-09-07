@@ -148,7 +148,7 @@ PARCEL_OUT_COLS = ["parcel_prefix", *ASSESS_VALUE_COLS]
 # is ordered and nothing wins over anything else, which puts the whole weight of
 # precision on the patterns themselves:
 #  - bare `panel` would match "42 solar panels installed", so every panel
-#    pattern requires a qualifier ("main panel", "panel upgrade", ...). There is
+#    pattern requires a qualifier ("main panel", "electrical panel", ...). There is
 #    no longer an earlier solar rule shadowing it.
 #  - bare `amp` is a substring of example/camp/ramp, so it must be word-bounded
 #    and digit-prefixed. The trailing `s?` matters just as much: `amp\b` alone
@@ -850,7 +850,7 @@ def build_frontend_data(joined: pd.DataFrame, gdb_path: Path, out_dir: Path,
         "headline": {
             "solar": headline("solar", "Rooftop solar", out["kw"]),
             "hp": headline("hp", "Heat pumps"),
-            "panel": headline("panel", "Panel upgrade"),
+            "panel": headline("panel", "electrical panel"),
         },
         "facets": {
             "prop_class": sorted(out["prop_class"].dropna().unique()),

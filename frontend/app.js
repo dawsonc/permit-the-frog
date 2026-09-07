@@ -4,7 +4,7 @@
 // FRONTEND_FLAGS in scripts/process_somerville_data.py.
 const FLAGS = [
   ["hp", "Heat pumps"],
-  ["panel", "Panel upgrade"],
+  ["panel", "Electrical panel"],
   ["solar", "Rooftop solar"],
   ["hpwh", "Heat pump water heater"],
   ["ev", "EV charger"],
@@ -139,6 +139,8 @@ function render() {
     : "No permits match these filters.";
   $("more").hidden = shown.length >= rows.length;
 
+  syncAreaBounds();
+
   // An x that would do nothing is noise, so it only appears on a set filter.
   for (const b of $("filter-form").querySelectorAll("[data-clears]"))
     b.hidden = !isSet(b.dataset.clears.split(" "));
@@ -180,6 +182,21 @@ const isSet = (names) =>
       names.includes(el.name) &&
       (el.type === "checkbox" ? el.checked : el.multiple ? el.selectedOptions.length : el.value !== "")
   );
+
+/**
+ * Keep the living-area range self-consistent: hide options in each select that
+ * would invert the range. The "any" option always stays, so either end can be
+ * cleared, and a selected option is never hidden — an inconsistent pair from a
+ * hand-edited URL should read oddly rather than look blank.
+ */
+function syncAreaBounds() {
+  const min = $("area-min").value;
+  const max = $("area-max").value;
+  for (const o of $("area-min").options)
+    o.hidden = o.value !== "" && max !== "" && +o.value > +max && !o.selected;
+  for (const o of $("area-max").options)
+    o.hidden = o.value !== "" && min !== "" && +o.value < +min && !o.selected;
+}
 
 /** Populate the form from the query string. Must run after buildControls(),
     since it can only select options that already exist. */
