@@ -25,8 +25,14 @@ assessor-data:
 	fi
 
 PROCESSED_SOMERVILLE = data/processed/ma/somerville/joined_data.csv
+FILTERED_SOMERVILLE = data/processed/ma/somerville/joined_filtered_data.csv
 
 process-somerville: permitting-data assessor-data
-	uv run python scripts/process_somerville_data.py --out $(PROCESSED_SOMERVILLE)
+	uv run python scripts/process_somerville_data.py --out $(PROCESSED_SOMERVILLE) --filtered-out $(FILTERED_SOMERVILLE)
 
-.PHONY: noop permitting-data assessor-data process-somerville
+# Independent Haiku labeling of the permit descriptions, to audit the regex
+# flags. Long-running and resumable: rerun to continue where it left off.
+label-somerville-llm:
+	uv run python scripts/label_permits_llm.py --workers 32
+
+.PHONY: noop permitting-data assessor-data process-somerville label-somerville-llm

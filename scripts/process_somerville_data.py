@@ -11,6 +11,8 @@ Steps:
     - flags are independent, so a permit can carry several; all-false is the old "other"
 4. Merge with assessor data on LOC_ID (needs normalization)
     - YEAR_BUILT, RES_AREA, NUM_ROOMS, STYLE, USE_CODE, STORIES (noramlized)
+5. Write a second, filtered table for analysis (FILTER_PARAMS, from notebook 02)
+    - joined_data.csv stays the source of truth; joined_filtered_data.csv is derived
 """
 
 # Coding style: minimal abstraction for the MVP, clearly readable data pipeline. Callable from CLI. Add a makefile action when done
@@ -30,6 +32,34 @@ DEFAULT_ASSESSOR_GDB = Path(
     "data/raw/ma/assessor/2026_09_06/M274_parcels_gdb/M274_parcels_CY25_FY25_sde.gdb"
 )
 DEFAULT_OUT = Path("data/processed/ma/somerville/joined_data.csv")
+DEFAULT_FILTERED_OUT = Path("data/processed/ma/somerville/joined_filtered_data.csv")
+
+# Analysis filters, ported from section 6 of
+# notebooks/02_somerville_processed_summary.ipynb. The unfiltered table stays the
+# source of truth; this is written alongside it so the decision stays reversible.
+SOM_BBOX = {"lat": (42.37, 42.42), "lon": (-71.14, -71.07)}
+
+FILTER_PARAMS = dict(
+    # --- structural: the row can't support attribute-level analysis ---
+    require_assessor_match=True,   # drop match_level.isna()
+    require_res_area=True,         # drop res_area == 0 (assessor sentinel)
+    require_year_built=True,       # drop year_built.isna()
+
+    # --- scope: what counts as a "building" for your question ---
+    max_assess_records=6,          # e.g. 5 to keep 1-3 family; None = keep all
+    unit_matches_only=False,       # True = drop the parcel-level aggregates entirely
+
+    # --- value ranges ---
+    year_built_range=(1630, 2027),
+    res_area_range=(200, None),    # None = no upper bound
+    num_rooms_max=None,            # e.g. 30
+
+    # --- date coverage ---
+    date_range=(None, None),       # e.g. ("2015-01-01", "2025-12-31")
+
+    # --- geography ---
+    require_in_bbox=True,
+)
 
 # The four construction trades. Every other Application Type in the file is a
 # license (food, block parties, ...) with no occupancy class and no parcel work.
@@ -43,6 +73,7 @@ PERMIT_COLS = {
     "Application Type": "application_type",
     "Application Subtype": "application_subtype",
     "Project Description or Business Name": "project_description",
+    "Estimated Construction Cost": "estimated_construction_cost",
     "Application Address": "address",
     "Assessor's Parcel Number": "apn",
     "Application Latitude": "latitude",
@@ -155,9 +186,10 @@ PROJECT_TYPE_COLS = [label for label, _ in PROJECT_TYPE_PATTERNS] + ["ess"]
 
 OUTPUT_COLS = [
     "application_number", "application_date", "application_type", "application_subtype",
-    "project_description", *PROJECT_TYPE_COLS, "solar_kw", "ess_kwh",
+    "estimated_construction_cost",
+    "project_description", *PROJECT_TYPE_COLS, "solar_kw", "ess_kwh", "zones",
     "address", "apn", "parcel_key", "parcel_prefix",
-    "latitude", "longitude", "contractor_company_name", "applicant_company_name",
+    "latitude", "longitude", "company_name", "company_source",
     "match_level", "assess_records", "loc_id", "prop_id",
     "year_built", "res_area", "num_rooms", "style", "use_code", "stories", "units",
 ]
@@ -182,6 +214,14 @@ def load_permits(path: Path) -> pd.DataFrame:
     df["application_date"] = pd.to_datetime(df["application_date"], errors="coerce")
     for col in ("latitude", "longitude"):
         df[col] = pd.to_numeric(df[col], errors="coerce")
+    # Money ships as "450,000". Strip the separators and any currency symbol;
+    # blanks and anything unparseable become NaN rather than 0, since "not
+    # stated" and "cost nothing" are different facts. Gas Fitting and Plumbing
+    # never populate this column at all.
+    df["estimated_construction_cost"] = pd.to_numeric(
+        df["estimated_construction_cost"].str.replace(r"[$,]", "", regex=True).str.strip(),
+        errors="coerce",
+    )
     return df
 
 
@@ -197,15 +237,44 @@ def filter_residential(df: pd.DataFrame) -> pd.DataFrame:
     return df[occupancy == "Residential"].copy()
 
 
+def merge_company_names(df: pd.DataFrame) -> tuple[pd.Series, pd.Series]:
+    """Coalesce the two party columns into one, contractor first.
+
+    Only Building and Electrical permits populate Contractor Company Name; on
+    Gas Fitting and Plumbing it is empty on every row and Applicant Company Name
+    is the only party named. Reading the contractor column alone therefore looks
+    like a third of the file has no company, when really two of the four trades
+    record it in the other field.
+
+    Both are stripped first: values carry trailing spaces ("Primus Company "),
+    which otherwise makes a blank read as present.
+
+    Returns (company_name, company_source) -- the second says which column the
+    name came from, so "who did the work" analyses can still tell a contractor
+    from a self-filing applicant.
+    """
+    contractor, applicant = (
+        df[col].str.strip().replace("", pd.NA) for col in
+        ("contractor_company_name", "applicant_company_name")
+    )
+    name = contractor.fillna(applicant)
+    source = pd.Series(pd.NA, index=df.index, dtype="object")
+    source[applicant.notna()] = "applicant"
+    source[contractor.notna()] = "contractor"
+    return name, source
+
+
 # System size, e.g. "7.1 kW DC", "13.975KW", "5.33 KWDC", "4.16 kW-DC".
 # DC is the nameplate rating and is preferred: descriptions that quote both
 # ("36.26 kW DC / 25.00 kW AC") should yield the DC figure, and an amended
 # description ("CHANGED TO 2.46 kWDC ... Install 3.280 kW panels") should yield
 # the correction rather than the superseded number, so the first DC match wins.
 # `(?!h)` keeps kWh battery capacity out -- 23 solar rows also quote storage.
-SOLAR_KW_DC = r"(\d+(?:[.,]\d+)?)\s*kw\s*-?\s*dc"
-SOLAR_KW_ANY = r"(\d+(?:[.,]\d+)?)\s*kw(?!h)"
-ESS_KWH = r"(\d+(?:[.,]\d+)?)\s*kwh"
+# `[.,]+` rather than `[.,]`: a typo like "5..50 kW" would otherwise fail to
+# match at the "5", and the engine would retry at the "50" and capture 50.
+SOLAR_KW_DC = r"(\d+(?:[.,]+\d+)?)\s*kw\s*-?\s*dc"
+SOLAR_KW_ANY = r"(\d+(?:[.,]+\d+)?)\s*kw(?!h)"
+ESS_KWH = r"(\d+(?:[.,]+\d+)?)\s*kwh"
 
 # Residential arrays run ~1-15 kW and the largest real one here is a 287 kW
 # multifamily roof. Anything outside this window is a misread rather than a
@@ -217,12 +286,26 @@ SOLAR_KW_RANGE = (0.5, 500.0)
 # detectors and emergency lights. So negated phrases are stripped out first,
 # and a bare "battery" only counts on a permit that is already solar.
 ESS_NEGATED = (
-    r"\bno\s*[-/]?\s*(?:ess\b|batter\w*|energy\s+storage)"
+    # Bare "storage" has to be in here, not just "energy storage": applicants
+    # write "No storage batteries" and "no storage system", and without it the
+    # disclaimer is missed and then matched as if it were real storage.
+    r"\bno\s*[-/]?\s*(?:ess\b|batter\w*|(?:energy\s+)?storage(?:\s+(?:system|batter\w*))?)"
     # "No Battery ESS", "No Battery/ESS", "No ESS & battery" all disclaim both.
-    r"(?:[\s/&]+(?:ess\b|batter\w*|energy\s+storage))*"
+    r"(?:[\s/&]+(?:ess\b|batter\w*|(?:energy\s+)?storage))*"
 )
 ESS_STRONG = r"\bess\b|energy\s+storage|powerwall|storage\s+system|encharge"
 ESS_BATTERY = r"\bbatter"
+
+# Heat pump size proxy: how many indoor units the description names.
+ZONE_WORDS = {"one": 1, "two": 2, "three": 3, "four": 4,
+              "five": 5, "six": 6, "seven": 7, "eight": 8}
+ZONE_NOUN = r"(?:zones?|heads?|indoor\s+units?|mini[\s-]?splits?|fan\s+coils?|air\s+handlers?)"
+# A number followed by one of these is a rating, not a count of anything.
+ZONE_UNIT = r"(?:amps?|tons?|volts?|kw|k|btus?|seer|inch|ft|hour|hr)"
+ZONES_RE = (
+    rf"\b(\d{{1,2}}|{'|'.join(ZONE_WORDS)})\s+(?!{ZONE_UNIT}\b)(?:\w+\s+)?{ZONE_NOUN}"
+)
+ZONES_RANGE = (1, 20)
 
 
 def _parse_number(raw: pd.Series) -> pd.Series:
@@ -232,7 +315,8 @@ def _parse_number(raw: pd.Series) -> pd.Series:
     so strip a comma that groups three digits and treat any other as a decimal
     point. Left naive, "4,76 kW" reads as 76.
     """
-    cleaned = raw.str.replace(r",(\d{3})\b", r"\1", regex=True)
+    cleaned = raw.str.replace(r"[.,]{2,}", ".", regex=True)      # "5..50" -> "5.50"
+    cleaned = cleaned.str.replace(r",(\d{3})\b", r"\1", regex=True)
     return pd.to_numeric(cleaned.str.replace(",", ".", regex=False), errors="coerce")
 
 
@@ -256,6 +340,27 @@ def extract_ess_kwh(descriptions: pd.Series, has_ess: pd.Series) -> pd.Series:
     text = descriptions.fillna("").str.lower()
     size = _parse_number(text.str.extract(ESS_KWH, expand=False))
     return size.where(has_ess)
+
+
+def extract_zones(descriptions: pd.Series, is_heat_pump: pd.Series) -> pd.Series:
+    """Indoor-unit count as a heat pump size proxy; NA where not stated.
+
+    Tonnage would be the natural size measure but is not viable here -- only 56
+    of the heat pump rows name tons and 17 give BTU. What descriptions do name
+    is how many indoor units were hung ("3 zone ductless", "five mini splits",
+    "4 ductless fan coils"), which tracks system size closely enough to use.
+
+    One optional word may sit between the number and the noun, because that is
+    how half these phrases read. The rating-unit guard is what makes that safe:
+    without it "Install 25 amp mini split Disconnect" parses as 25 zones.
+    """
+    text = descriptions.fillna("").str.lower()
+    raw = text.str.extract(ZONES_RE, expand=False)
+    count = pd.to_numeric(
+        raw.map(lambda v: ZONE_WORDS.get(v, v) if isinstance(v, str) else v),
+        errors="coerce",
+    )
+    return count.where(is_heat_pump & count.between(*ZONES_RANGE))
 
 
 def flag_project_types(descriptions: pd.Series) -> pd.DataFrame:
@@ -400,6 +505,8 @@ def process(permits_path: Path, gdb_path: Path) -> pd.DataFrame:
     permits[PROJECT_TYPE_COLS] = flag_project_types(permits["project_description"])
     permits["solar_kw"] = extract_solar_kw(permits["project_description"], permits["solar_pv"])
     permits["ess_kwh"] = extract_ess_kwh(permits["project_description"], permits["ess"])
+    permits["zones"] = extract_zones(permits["project_description"], permits["heat_pumps"])
+    permits["company_name"], permits["company_source"] = merge_company_names(permits)
     permits["parcel_key"] = permits["apn"].map(normalize_parcel_id)
     permits["parcel_prefix"] = parcel_prefix(permits["parcel_key"])
 
@@ -419,10 +526,111 @@ def process(permits_path: Path, gdb_path: Path) -> pd.DataFrame:
     print(f"  {'-- untagged --':<17} {(tagged == 0).sum():>6}")
     print(f"  {'-- 2+ flags --':<17} {(tagged > 1).sum():>6}")
 
+    named = joined["company_name"].notna()
+    print(f"\nCompany name: {named.mean():.1%} of permits name a party "
+          f"({(~named).sum():,} name none)")
+    print(joined["company_source"].value_counts(dropna=False).to_string())
+
+    cost = joined["estimated_construction_cost"]
+    print(f"\nConstruction cost: {cost.notna().sum():,} of {len(joined):,} permits state one "
+          f"({cost.notna().mean():.1%})")
+    print(f"  median ${cost.median():,.0f}   p99 ${cost.quantile(0.99):,.0f}   "
+          f"max ${cost.max():,.0f}   zero-or-negative {int((cost <= 0).sum()):,}")
+
+    z = joined.loc[joined["heat_pumps"], "zones"]
+    print(f"\nHeat pump zones: {z.notna().sum():,} of {len(z):,} heat pump permits state an "
+          f"indoor-unit count ({z.notna().mean():.0%}, median {z.median():.0f})")
+
     kw = joined.loc[joined["solar_pv"], "solar_kw"]
     print(f"\nSolar size: {kw.notna().sum():,} of {len(kw):,} solar permits carry a kW figure "
           f"(median {kw.median():.2f} kW, max {kw.max():.1f})")
     return joined
+
+
+def build_filter_rules(frame: pd.DataFrame, p: dict) -> dict[str, pd.Series]:
+    """Each entry is a mask of rows the rule would REMOVE. Disabled rules are omitted."""
+    rules: dict[str, pd.Series] = {}
+    empty = lambda: pd.Series(False, index=frame.index)  # noqa: E731
+
+    if p["require_assessor_match"]:
+        rules["no assessor match"] = frame["match_level"].isna()
+    if p["require_res_area"]:
+        rules["res_area == 0 (sentinel)"] = frame["res_area"].eq(0)
+    if p["require_year_built"]:
+        rules["year_built missing"] = frame["year_built"].isna()
+
+    if p["max_assess_records"] is not None:
+        rules[f"assess_records > {p['max_assess_records']}"] = (
+            frame["assess_records"] > p["max_assess_records"]
+        ).fillna(False)
+    if p["unit_matches_only"]:
+        rules["parcel-level aggregate"] = frame["match_level"].eq("parcel")
+
+    lo, hi = p["year_built_range"]
+    if lo is not None or hi is not None:
+        mask = empty()
+        if lo is not None:
+            mask |= frame["year_built"].lt(lo).fillna(False)
+        if hi is not None:
+            mask |= frame["year_built"].gt(hi).fillna(False)
+        rules[f"year_built outside {p['year_built_range']}"] = mask
+
+    lo, hi = p["res_area_range"]
+    if lo is not None or hi is not None:
+        mask = empty()
+        if lo is not None:
+            mask |= frame["res_area"].lt(lo).fillna(False) & frame["res_area"].ne(0)
+        if hi is not None:
+            mask |= frame["res_area"].gt(hi).fillna(False)
+        rules[f"res_area outside {p['res_area_range']}"] = mask
+
+    if p["num_rooms_max"] is not None:
+        rules[f"num_rooms > {p['num_rooms_max']}"] = (
+            frame["num_rooms"].gt(p["num_rooms_max"]).fillna(False)
+        )
+
+    lo, hi = p["date_range"]
+    if lo is not None or hi is not None:
+        mask = empty()
+        if lo is not None:
+            mask |= frame["application_date"] < pd.Timestamp(lo)
+        if hi is not None:
+            mask |= frame["application_date"] > pd.Timestamp(hi)
+        rules[f"date outside {p['date_range']}"] = mask
+
+    if p["require_in_bbox"]:
+        rules["lat/lon missing or outside bbox"] = ~(
+            frame["latitude"].between(*SOM_BBOX["lat"])
+            & frame["longitude"].between(*SOM_BBOX["lon"])
+        ).fillna(False)
+
+    return rules
+
+
+def apply_filters(joined: pd.DataFrame, params: dict) -> pd.DataFrame:
+    """Drop rows the filter rules flag, reporting what each rule cost."""
+    rules = build_filter_rules(joined, params)
+    dropped = pd.DataFrame(rules, index=joined.index)
+    flagged = dropped.any(axis=1)
+    solo = dropped.sum(axis=1) == 1
+
+    print("\nFilter rules (rows removed):")
+    for name in dropped.columns:
+        print(f"  {name:<38} {dropped[name].sum():>6}   only: {(dropped[name] & solo).sum():>5}")
+
+    kept = joined[~flagged]
+    print(f"  {'-- kept --':<38} {len(kept):>6}   ({len(kept) / len(joined):.1%} of {len(joined):,})")
+
+    # The bias check: a rule that eats one project type is changing the answer,
+    # not cleaning the data. Compare each flag's removal rate to the overall one.
+    overall = flagged.mean() * 100
+    print(f"\nRemoval rate by project type (overall {overall:.1f}%):")
+    for col in PROJECT_TYPE_COLS:
+        before = joined[col].sum()
+        if before:
+            rate = (joined[col] & flagged).sum() / before * 100
+            print(f"  {col:<24} {rate:>5.1f}%  ({rate - overall:+.1f} pp)")
+    return kept
 
 
 def main() -> None:
@@ -433,6 +641,9 @@ def main() -> None:
     )
     parser.add_argument("--assessor-gdb", type=Path, default=DEFAULT_ASSESSOR_GDB)
     parser.add_argument("--out", type=Path, default=DEFAULT_OUT)
+    parser.add_argument("--filtered-out", type=Path, default=DEFAULT_FILTERED_OUT)
+    parser.add_argument("--no-filtered", action="store_true",
+                        help="skip the filtered table, write only --out")
     args = parser.parse_args()
 
     permits_path = args.permits or newest_permit_csv(DEFAULT_PERMIT_DIR)
@@ -441,6 +652,12 @@ def main() -> None:
     args.out.parent.mkdir(parents=True, exist_ok=True)
     joined[OUTPUT_COLS].to_csv(args.out, index=False)
     print(f"\nWrote {len(joined):,} rows x {len(OUTPUT_COLS)} columns to {args.out}")
+
+    if not args.no_filtered:
+        kept = apply_filters(joined, FILTER_PARAMS)
+        args.filtered_out.parent.mkdir(parents=True, exist_ok=True)
+        kept[OUTPUT_COLS].to_csv(args.filtered_out, index=False)
+        print(f"\nWrote {len(kept):,} rows x {len(OUTPUT_COLS)} columns to {args.filtered_out}")
 
 
 if __name__ == "__main__":
