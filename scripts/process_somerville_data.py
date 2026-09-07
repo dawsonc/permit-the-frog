@@ -33,6 +33,7 @@ DEFAULT_ASSESSOR_GDB = Path(
 )
 DEFAULT_OUT = Path("data/processed/ma/somerville/joined_data.csv")
 DEFAULT_FILTERED_OUT = Path("data/processed/ma/somerville/joined_filtered_data.csv")
+DEFAULT_FRONTEND_OUT = Path("frontend/data")
 
 # Analysis filters, ported from section 6 of
 # notebooks/02_somerville_processed_summary.ipynb. The unfiltered table stays the
@@ -61,6 +62,44 @@ FILTER_PARAMS = dict(
     require_in_bbox=True,
 )
 
+# --- Frontend export (frontend/assets/data_spec.md) ------------------------
+# A de-identified projection for the static page. The page answers "what do
+# people with a house like yours pay?", matching on property attributes and
+# never on identity of place, so nothing here may join a permit back to an
+# address -- see verify_deidentified().
+
+# Only permits carrying one of these reach the page; the rest name no equipment.
+FRONTEND_FLAGS = {
+    "solar_pv": "solar", "heat_pumps": "hp", "heat_pump_water_heater": "hpwh",
+    "ev_charger": "ev", "electrical_panel": "panel", "other_hvac": "hvac", "ess": "ess",
+}
+
+# Both emitted files must bucket on the SAME grid: addresses.json attributes are
+# compared against permits.json attributes, so a mismatch silently matches nothing.
+YEAR_BUCKET = 10     # decade
+AREA_BUCKET = 500    # sq ft
+
+# MA state class code (first three digits of use_code) -> facet label.
+PROP_CLASS = {
+    "101": "Single family", "102": "Condominium", "104": "Two-family",
+    "105": "Three-family", "109": "Multiple houses on one parcel",
+    "111": "Apartments", "112": "Apartments",
+}
+PROP_CLASS_OTHER = "Other / mixed use"
+
+DESC_MAX_CHARS = 200
+
+# Street-type words, longest first so "street" wins over "st" in the alternation.
+STREET_SUFFIX_MAP = {
+    "street": "st", "avenue": "ave", "road": "rd", "parkway": "pkwy",
+    "terrace": "terr", "boulevard": "blvd", "place": "pl", "court": "ct",
+    "highway": "hwy", "drive": "dr", "lane": "ln", "square": "sq",
+}
+
+# Columns that must never appear in the emitted payload, by substring. Each one
+# individually reconstitutes the address column (spec section 5).
+FORBIDDEN_COL_PARTS = ("addr", "parcel", "lat", "lon", "loc_id", "prop_id", "apn", "id")
+
 # The four construction trades. Every other Application Type in the file is a
 # license (food, block parties, ...) with no occupancy class and no parcel work.
 PERMIT_FAMILIES = ["Building Permit", "Electrical Permit", "Gas Fitting", "Plumbing Permit"]
@@ -74,6 +113,8 @@ PERMIT_COLS = {
     "Application Subtype": "application_subtype",
     "Project Description or Business Name": "project_description",
     "Estimated Construction Cost": "estimated_construction_cost",
+    "Status": "status",
+    "Application Neighborhood": "neighborhood",
     "Application Address": "address",
     "Assessor's Parcel Number": "apn",
     "Application Latitude": "latitude",
@@ -186,7 +227,7 @@ PROJECT_TYPE_COLS = [label for label, _ in PROJECT_TYPE_PATTERNS] + ["ess"]
 
 OUTPUT_COLS = [
     "application_number", "application_date", "application_type", "application_subtype",
-    "estimated_construction_cost",
+    "status", "neighborhood", "estimated_construction_cost",
     "project_description", *PROJECT_TYPE_COLS, "solar_kw", "ess_kwh", "zones",
     "address", "apn", "parcel_key", "parcel_prefix",
     "latitude", "longitude", "company_name", "company_source",
@@ -633,6 +674,205 @@ def apply_filters(joined: pd.DataFrame, params: dict) -> pd.DataFrame:
     return kept
 
 
+def bucket(values: pd.Series, width: int) -> pd.Series:
+    """Floor to a multiple of `width`, preserving NA."""
+    return (values // width) * width
+
+
+def label_prop_class(use_code: pd.Series) -> pd.Series:
+    """MA state class code -> facet label. The clean alternative to `style`."""
+    return use_code.astype("string").str[:3].map(PROP_CLASS).fillna(PROP_CLASS_OTHER)
+
+
+def load_addresses(gdb_path: Path) -> pd.DataFrame:
+    """One row per building address, rolled up from the unit-level assessor table.
+
+    Read separately from load_assessor so SITE_ADDR never enters the analysis
+    CSV's column set. Condo buildings contribute many unit rows per address, so
+    attributes are aggregated to a representative dwelling (median), not summed.
+    """
+    cols = ["SITE_ADDR", "ADDR_NUM", "YEAR_BUILT", "RES_AREA", "STORIES", "USE_CODE"]
+    raw = gpd.read_file(gdb_path, layer="M274Assess")[cols]
+
+    addr = (raw["SITE_ADDR"].fillna("").str.replace(r"#.*$", "", regex=True)
+            .str.replace(r"\s+", " ", regex=True).str.strip())
+    # Vacant parcels and paper streets. The sentinel is not always a bare "0":
+    # the file also carries "0R RUTHERFORD AVE" and "0000R WEST ST", so test the
+    # leading number's value rather than string-comparing ADDR_NUM.
+    lead = pd.to_numeric(addr.str.extract(r"^(\d+)", expand=False), errors="coerce")
+    keep = (addr != "") & addr.str.match(r"^\d") & lead.gt(0)
+
+    frame = pd.DataFrame({
+        "addr": addr[keep],
+        "year_built": pd.to_numeric(raw.loc[keep, "YEAR_BUILT"], errors="coerce"),
+        "res_area": pd.to_numeric(raw.loc[keep, "RES_AREA"], errors="coerce"),
+        "stories": pd.to_numeric(raw.loc[keep, "STORIES"], errors="coerce").replace(0, pd.NA),
+        "prop_class": label_prop_class(raw.loc[keep, "USE_CODE"]),
+    })
+    mode = lambda s: s.mode().iloc[0] if not s.mode().empty else None  # noqa: E731
+    return frame.groupby("addr", as_index=False).agg(
+        year_built=("year_built", "median"),
+        res_area=("res_area", "median"),
+        stories=("stories", "median"),
+        prop_class=("prop_class", mode),
+    )
+
+
+def normalize_address(addr: pd.Series) -> pd.Series:
+    """Lowercase, collapse whitespace, and abbreviate street types.
+
+    Somerville's assessor file is entirely abbreviated ("MAIN ST"), so a visitor
+    typing "Main Street" matches nothing under any matcher unless both sides are
+    mapped onto the same vocabulary. app.js must apply this same map to the query.
+    """
+    out = addr.str.lower().str.replace(r"\s+", " ", regex=True).str.strip()
+    for long, short in STREET_SUFFIX_MAP.items():
+        out = out.str.replace(rf"\b{long}\b", short, regex=True)
+    return out
+
+
+def build_address_scrubber(addresses: pd.DataFrame) -> re.Pattern:
+    """A regex matching '<number> <real Somerville street>' in free text.
+
+    Built from the 697 street names actually in the assessor file rather than a
+    generic '<number> <word> <suffix>' pattern, which over-matches ordinary
+    prose ("3 Story Ave"). Each street is matched in both its abbreviated and
+    spelled-out form, since applicants write "75 myrtle street".
+    """
+    streets = (addresses["addr"].str.replace(r"^\d+[A-Za-z]?(?:-\d+[A-Za-z]?)?\s+", "", regex=True)
+               .str.lower().str.strip())
+    expand = {short: long for long, short in STREET_SUFFIX_MAP.items()}
+    variants = set()
+    for name in streets.dropna().unique():
+        if not name:
+            continue
+        variants.add(name)
+        head, _, last = name.rpartition(" ")
+        if head and last in expand:
+            variants.add(f"{head} {expand[last]}")
+    # Longest first so "mystic valley pkwy" wins over a shorter prefix.
+    alternation = "|".join(re.escape(v) for v in sorted(variants, key=len, reverse=True))
+    return re.compile(rf"\b\d+\s*-?\s*\d*\s+(?:{alternation})\b", re.IGNORECASE)
+
+
+def scrub_descriptions(desc: pd.Series, scrubber: re.Pattern) -> pd.Series:
+    """Redact street addresses, then truncate. Order matters: truncating first
+    could cut an address in half and leave the fragment unmatched."""
+    return (desc.fillna("").str.replace(scrubber, "[address]", regex=True)
+            .str.replace(r"\s+", " ", regex=True).str.strip().str[:DESC_MAX_CHARS])
+
+
+def verify_deidentified(payload: dict, scrubber: re.Pattern) -> None:
+    """Refuse to write a payload that could be joined back to an address.
+
+    This is the guard that stops a later "just add parcel_prefix, it's useful
+    for debugging" from quietly undoing the whole design.
+    """
+    cols = payload["cols"]
+    idx = {c: i for i, c in enumerate(cols)}
+    for col in cols:
+        bad = [p for p in FORBIDDEN_COL_PARTS if p in col.lower()]
+        # "res_area" contains no forbidden part; guard against accidental matches
+        # only on whole-word-ish grounds by exempting the known-safe names.
+        if bad and col not in {"res_area", "attr_level"}:
+            raise AssertionError(f"column {col!r} looks identifying ({bad[0]}) -- refusing to write")
+
+    leaks = [r[idx["desc"]] for r in payload["rows"] if r[idx["desc"]] and scrubber.search(r[idx["desc"]])]
+    if leaks:
+        raise AssertionError(f"{len(leaks)} descriptions still contain an address, e.g. {leaks[0]!r}")
+
+    for col, width in (("year_built", YEAR_BUCKET), ("res_area", AREA_BUCKET)):
+        off = [r[idx[col]] for r in payload["rows"] if r[idx[col]] is not None and r[idx[col]] % width]
+        if off:
+            raise AssertionError(f"{len(off)} {col} values are not on a {width} grid, e.g. {off[0]}")
+
+
+def _jsonable(frame: pd.DataFrame) -> list:
+    """Rows as plain lists, with NaN -> None and numpy scalars unwrapped."""
+    return [[None if pd.isna(v) else (v.item() if hasattr(v, "item") else v) for v in row]
+            for row in frame.itertuples(index=False, name=None)]
+
+
+def build_frontend_data(joined: pd.DataFrame, gdb_path: Path, out_dir: Path,
+                        permits_path: Path) -> None:
+    """Write the three de-identified files the static page loads."""
+    import json
+
+    addresses = load_addresses(gdb_path)
+    scrubber = build_address_scrubber(addresses)
+
+    tagged = joined[joined[list(FRONTEND_FLAGS)].any(axis=1)].copy()
+    out = pd.DataFrame({
+        "date": tagged["application_date"].dt.strftime("%Y-%m"),
+        "trade": tagged["application_type"],
+        "status": tagged["status"],
+        "desc": scrub_descriptions(tagged["project_description"], scrubber),
+        "cost": tagged["estimated_construction_cost"],
+        **{short: tagged[col].astype(int) for col, short in FRONTEND_FLAGS.items()},
+        "kw": tagged["solar_kw"],
+        "zones": tagged["zones"],
+        "hood": tagged["neighborhood"],
+        "contractor": tagged["company_name"],
+        "year_built": bucket(tagged["year_built"], YEAR_BUCKET),
+        "res_area": bucket(tagged["res_area"], AREA_BUCKET),
+        "stories": tagged["stories"],
+        "style": tagged["style"],
+        "prop_class": label_prop_class(tagged["use_code"]),
+        "attr_level": tagged["match_level"],
+    })
+    # Source order is chronological within parcel, so neighbouring rows are
+    # usually the same building. Shuffle before writing.
+    out = out.sample(frac=1, random_state=0).reset_index(drop=True)
+
+    permits = {"cols": list(out.columns), "rows": _jsonable(out)}
+    verify_deidentified(permits, scrubber)
+
+    addr_out = addresses.assign(
+        norm=normalize_address(addresses["addr"]),
+        year_built=bucket(addresses["year_built"], YEAR_BUCKET),
+        res_area=bucket(addresses["res_area"], AREA_BUCKET),
+    )[["addr", "norm", "year_built", "res_area", "stories", "prop_class"]]
+
+    cost = out["cost"]
+    def headline(flag: str, label: str, per: pd.Series | None = None) -> dict:
+        rows = out[out[flag] == 1]
+        value = (rows["cost"] / per[rows.index]).median() if per is not None else rows["cost"].median()
+        return {"label": label, "value": None if pd.isna(value) else round(float(value)),
+                "unit": "/kW" if per is not None else "", "n": int(rows["cost"].notna().sum())}
+
+    meta = {
+        "generated": pd.Timestamp.today().strftime("%Y-%m-%d"),
+        "permit_extract": permits_path.stem,
+        "assessor_vintage": "CY25_FY25",
+        "date_range": [out["date"].min(), out["date"].max()],
+        "n_permits": len(out),
+        "n_addresses": len(addr_out),
+        "headline": {
+            "solar": headline("solar", "Rooftop solar", out["kw"]),
+            "hp": headline("hp", "Heat pumps"),
+            "panel": headline("panel", "Panel upgrade"),
+        },
+        "facets": {
+            "prop_class": sorted(out["prop_class"].dropna().unique()),
+            "hood": sorted(out["hood"].dropna().unique()),
+            "trade": sorted(out["trade"].dropna().unique()),
+            "status": sorted(out["status"].dropna().unique()),
+        },
+    }
+
+    out_dir.mkdir(parents=True, exist_ok=True)
+    (out_dir / "permits.json").write_text(json.dumps(permits, separators=(",", ":")))
+    (out_dir / "addresses.json").write_text(json.dumps(
+        {"cols": list(addr_out.columns), "rows": _jsonable(addr_out)}, separators=(",", ":")))
+    (out_dir / "meta.json").write_text(json.dumps(meta, indent=2))
+
+    print(f"\nFrontend: {len(out):,} tagged permits, {len(addr_out):,} addresses -> {out_dir}")
+    print("  " + "  ".join(f"{p.name} {p.stat().st_size / 1e6:.2f} MB"
+                           for p in sorted(out_dir.glob("*.json"))))
+    print(f"  cost present on {cost.notna().mean():.0%} of rows; "
+          f"de-identification assertions passed")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument(
@@ -644,6 +884,9 @@ def main() -> None:
     parser.add_argument("--filtered-out", type=Path, default=DEFAULT_FILTERED_OUT)
     parser.add_argument("--no-filtered", action="store_true",
                         help="skip the filtered table, write only --out")
+    parser.add_argument("--frontend-out", type=Path, default=DEFAULT_FRONTEND_OUT)
+    parser.add_argument("--no-frontend", action="store_true",
+                        help="skip the de-identified frontend JSON files")
     args = parser.parse_args()
 
     permits_path = args.permits or newest_permit_csv(DEFAULT_PERMIT_DIR)
@@ -658,6 +901,9 @@ def main() -> None:
         args.filtered_out.parent.mkdir(parents=True, exist_ok=True)
         kept[OUTPUT_COLS].to_csv(args.filtered_out, index=False)
         print(f"\nWrote {len(kept):,} rows x {len(OUTPUT_COLS)} columns to {args.filtered_out}")
+
+    if not args.no_frontend:
+        build_frontend_data(joined, args.assessor_gdb, args.frontend_out, permits_path)
 
 
 if __name__ == "__main__":

@@ -1,0 +1,80 @@
+{
+  "generated": "2026-09-06",
+  "permit_extract": "2026_09_05",
+  "assessor_vintage": "CY25_FY25",
+  "date_range": [
+    "2014-03",
+    "2026-09"
+  ],
+  "n_permits": 13144,
+  "n_addresses": 14353,
+  "headline": {
+    "solar": {
+      "label": "Rooftop solar",
+      "value": 4418,
+      "unit": "/kW",
+      "n": 2369
+    },
+    "hp": {
+      "label": "Heat pumps",
+      "value": 6003,
+      "unit": "",
+      "n": 1474
+    },
+    "panel": {
+      "label": "Panel upgrade",
+      "value": 5000,
+      "unit": "",
+      "n": 3380
+    }
+  },
+  "facets": {
+    "prop_class": [
+      "Apartments",
+      "Condominium",
+      "Multiple houses on one parcel",
+      "Other / mixed use",
+      "Single family",
+      "Three-family",
+      "Two-family"
+    ],
+    "hood": [
+      "Assembly Square",
+      "Ball Square",
+      "Boynton Yards",
+      "Davis Square",
+      "Duck Village",
+      "East Somerville",
+      "Hillside",
+      "Inner Belt",
+      "Magoun Square",
+      "Porter Square",
+      "Powder House Square",
+      "Spring Hill",
+      "Teele Square",
+      "Ten Hills",
+      "Twin City",
+      "Union Square",
+      "Winter Hill"
+    ],
+    "trade": [
+      "Building Permit",
+      "Electrical Permit",
+      "Gas Fitting",
+      "Plumbing Permit"
+    ],
+    "status": [
+      "Approved",
+      "Approved/Waiting for Payment",
+      "Closed",
+      "Complete",
+      "Denied",
+      "Expired",
+      "Issued",
+      "Online Application Received",
+      "Revoked",
+      "Under Review",
+      "Withdrawn"
+    ]
+  }
+}

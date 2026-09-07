@@ -26,9 +26,10 @@ assessor-data:
 
 PROCESSED_SOMERVILLE = data/processed/ma/somerville/joined_data.csv
 FILTERED_SOMERVILLE = data/processed/ma/somerville/joined_filtered_data.csv
+FRONTEND_DIR = frontend/data
 
 process-somerville: permitting-data assessor-data
-	uv run python scripts/process_somerville_data.py --out $(PROCESSED_SOMERVILLE) --filtered-out $(FILTERED_SOMERVILLE)
+	uv run python scripts/process_somerville_data.py --out $(PROCESSED_SOMERVILLE) --filtered-out $(FILTERED_SOMERVILLE) --frontend-out $(FRONTEND_DIR)
 
 # Independent Haiku labeling of the permit descriptions, to audit the regex
 # flags. Long-running and resumable: rerun to continue where it left off.
