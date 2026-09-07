@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>What should you pay? — Somerville, MA</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<header>
+  <h1>How much should you be paying for <b>home electrification</b>?</h1>
+  <p class="sub">in Somerville, MA</p>
+  <div id="cards" class="cards"></div>
+</header>
+
+<main>
+  <p class="lead">See what other people in Somerville are paying</p>
+
+  <section class="filters">
+    <div class="row">
+      <label for="addr">Your address</label>
+      <input id="addr" type="text" list="addr-list" autocomplete="off"
+             placeholder="Type your address to get started&hellip;">
+      <datalist id="addr-list"></datalist>
+      <span id="addr-note" class="note"></span>
+    </div>
+
+    <div class="row">
+      <label>Project type</label>
+      <div id="flags" class="checks"></div>
+    </div>
+
+    <div class="row" id="facets"></div>
+
+    <div class="row">
+      <label for="year-min">Year built</label>
+      <select id="year-min"></select> to <select id="year-max"></select>
+
+      <label for="area-min">Living area</label>
+      <select id="area-min"></select> to <select id="area-max"></select>
+    </div>
+
+    <div class="row">
+      <label for="q">Search description</label>
+      <input id="q" type="search" placeholder="e.g. mini split">
+      <button id="clear" type="button">Clear all filters</button>
+    </div>
+  </section>
+
+  <p id="count" class="count">Loading&hellip;</p>
+
+  <div class="table-wrap">
+    <table id="table">
+      <thead><tr id="head"></tr></thead>
+      <tbody id="body"></tbody>
+    </table>
+  </div>
+
+  <p><button id="more" type="button" hidden>Show 200 more</button></p>
+
+  <footer id="meta" class="note"></footer>
+</main>
+
+<script src="app.js"></script>
+</body>
+</html>

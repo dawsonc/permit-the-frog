@@ -36,4 +36,8 @@ process-somerville: permitting-data assessor-data
 label-somerville-llm:
 	uv run python scripts/label_permits_llm.py --workers 32
 
-.PHONY: noop permitting-data assessor-data process-somerville label-somerville-llm
+# The page is static; a server is needed only because file:// blocks fetch.
+serve:
+	python3 -m http.server -d frontend 8000
+
+.PHONY: noop serve permitting-data assessor-data process-somerville label-somerville-llm

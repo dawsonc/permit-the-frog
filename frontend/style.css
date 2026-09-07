@@ -1,0 +1,35 @@
+/* Barebones only — the visual design pass comes later. */
+
+body { font: 14px/1.4 system-ui, sans-serif; margin: 0 auto; padding: 1rem; max-width: 1400px; }
+
+header { text-align: center; }
+h1 { font-weight: 400; font-size: 2rem; margin: 1rem 0 0.25rem; }
+.sub { font-style: italic; margin: 0 0 1.5rem; }
+.lead { text-align: center; }
+
+.cards { display: flex; gap: 1rem; justify-content: center; flex-wrap: wrap; }
+.card { background: #e6e6e6; border-radius: 8px; padding: 1rem 1.5rem; min-width: 12rem; }
+.card-value { font-size: 1.5rem; }
+.card-n, .note { color: #666; font-size: 0.85rem; }
+
+.filters { background: #f2f2f2; padding: 0.75rem; margin: 1rem 0; }
+.row { display: flex; flex-wrap: wrap; gap: 0.75rem; align-items: center; margin-bottom: 0.75rem; }
+.row:last-child { margin-bottom: 0; }
+.row > label { font-weight: 600; }
+.checks { display: flex; flex-wrap: wrap; gap: 0.75rem; }
+.checks label { font-weight: 400; }
+.facet { display: flex; flex-direction: column; gap: 0.25rem; }
+.facet label { font-weight: 600; }
+#addr { min-width: 20rem; }
+
+.count { font-weight: 600; }
+
+/* The table is wider than the viewport; it scrolls itself rather than the page.
+   That makes the wrapper a scroll container, which is why the header is not
+   sticky — revisit in the styling pass. */
+.table-wrap { overflow-x: auto; }
+table { border-collapse: collapse; width: 100%; }
+th, td { border-bottom: 1px solid #ddd; padding: 0.35rem 0.5rem; text-align: left; vertical-align: top; }
+th { cursor: pointer; background: #f2f2f2; white-space: nowrap; }
+td.desc { max-width: 32rem; }
+tbody tr:hover { background: #fafafa; }
