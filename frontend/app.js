@@ -16,7 +16,6 @@ const FLAGS = [
 // hardcoded — they change whenever the pipeline reruns.
 const FACETS = [
   ["prop_class", "Property type"],
-  ["hood", "Neighborhood"],
 ];
 
 const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun",
@@ -79,8 +78,8 @@ function readFilters() {
   return {
     flags: fd.getAll("flags"),
     prop_class: fd.getAll("prop_class"),
-    hood: fd.getAll("hood"),
     year: fd.get("year"),
+    since: fd.get("since"),
     areaMin: fd.get("areaMin"),
     areaMax: fd.get("areaMax"),
   };
@@ -90,8 +89,8 @@ function readFilters() {
 const matches = (f) => (p) =>
   (!f.flags.length || f.flags.some((k) => p[k] === 1)) &&
   (!f.prop_class.length || f.prop_class.includes(p.prop_class)) &&
-  (!f.hood.length || f.hood.includes(p.hood)) &&
   (!f.year || Math.abs(p.year_built - f.year) <= YEAR_SPAN) &&
+  (!f.since || p.date >= f.since) &&
   (!f.areaMin || p.res_area >= f.areaMin) &&
   (!f.areaMax || p.res_area <= f.areaMax);
 
@@ -143,7 +142,36 @@ function render() {
 
 function resetPage() {
   state.limit = PAGE;
+  syncUrl();
   render();
+}
+
+// --- URL state -------------------------------------------------------------
+// The form is the filter state, and FormData -> URLSearchParams serializes it
+// directly, repeated keys and all. The address input has no name, so it never
+// reaches the URL: a shared link carries the cohort, not the person's address.
+
+/** Rewrite the query string from the form. replaceState, so filtering does not
+    fill the back button with one entry per click. */
+function syncUrl() {
+  const params = new URLSearchParams();
+  for (const [k, v] of new FormData($("filter-form"))) if (v !== "") params.append(k, v);
+  history.replaceState(null, "", params.toString() ? "?" + params : location.pathname);
+}
+
+/** Populate the form from the query string. Must run after buildControls(),
+    since it can only select options that already exist. */
+function applyUrl() {
+  const params = new URLSearchParams(location.search);
+  if (![...params.keys()].length) return;
+
+  for (const el of $("filter-form").elements) {
+    if (!el.name) continue;
+    const want = params.getAll(el.name);
+    if (el.type === "checkbox") el.checked = want.includes(el.value);
+    else if (el.multiple) for (const o of el.options) o.selected = want.includes(o.value);
+    else el.value = want[0] ?? "";
+  }
 }
 
 // --- controls --------------------------------------------------------------
@@ -177,6 +205,13 @@ function buildControls() {
   fillOptions($("year-built"), buckets("year_built"), (v) => v + "s");
   fillOptions($("area-min"), areas, num);
   fillOptions($("area-max"), areas, num);
+
+  // Permit years, newest first — "since 2025" is a likelier pick than "since 2014".
+  // Never seeded by applyAddress: this is about the project, not the property.
+  const permitYears = [...new Set(PERMITS.map((p) => p.date && p.date.slice(0, 4)).filter(Boolean))]
+    .sort()
+    .reverse();
+  fillOptions($("since"), permitYears, (v) => v);
 
   // One listener for every filter control, present and future.
   const form = $("filter-form");
@@ -266,6 +301,7 @@ Promise.all(
 
     buildControls();
     setupAddress();
+    applyUrl();
     render();
   })
   .catch((err) => {

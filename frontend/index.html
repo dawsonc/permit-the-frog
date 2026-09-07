@@ -22,29 +22,29 @@
        none, so it resets with the form but never reaches FormData. -->
   <form id="filter-form" class="filters">
     <div class="row">
-      <label for="addr">Your address</label>
       <input id="addr" type="text" list="addr-list" autocomplete="off"
-             placeholder="Type your address to get started&hellip;">
+             placeholder="Type your address to get see similar projects&hellip;">
       <datalist id="addr-list"></datalist>
       <span id="addr-note" class="note"></span>
     </div>
 
     <div class="row">
-      <label>Project type</label>
       <div id="flags" class="checks"></div>
     </div>
 
     <div class="row" id="facets"></div>
 
     <div class="row">
-      <label for="year-built">Year built</label>
+      <label for="year-built">Built within 20 years of...</label>
       <select id="year-built" name="year"></select>
-      <span class="note">within 20 years</span>
 
       <label for="area-min">Living area</label>
       <select id="area-min" name="areaMin"></select>
       to
       <select id="area-max" name="areaMax"></select>
+
+      <label for="since">Only show projects since</label>
+      <select id="since" name="since"></select>
 
       <button id="clear" type="button">Clear all filters</button>
     </div>
