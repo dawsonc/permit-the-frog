@@ -138,6 +138,10 @@ function render() {
     ? `Showing ${shown.length.toLocaleString()} of ${rows.length.toLocaleString()} matching permits`
     : "No permits match these filters.";
   $("more").hidden = shown.length >= rows.length;
+
+  // An x that would do nothing is noise, so it only appears on a set filter.
+  for (const b of $("filter-form").querySelectorAll("[data-clears]"))
+    b.hidden = !isSet(b.dataset.clears.split(" "));
 }
 
 function resetPage() {
@@ -158,6 +162,24 @@ function syncUrl() {
   for (const [k, v] of new FormData($("filter-form"))) if (v !== "") params.append(k, v);
   history.replaceState(null, "", params.toString() ? "?" + params : location.pathname);
 }
+
+/** Reset just the named form fields — the per-filter x buttons. */
+function clearFields(names) {
+  for (const el of $("filter-form").elements) {
+    if (!names.includes(el.name)) continue;
+    if (el.type === "checkbox") el.checked = false;
+    else if (el.multiple) for (const o of el.options) o.selected = false;
+    else el.value = "";
+  }
+}
+
+/** Does any of these fields currently hold a value? Drives the x buttons. */
+const isSet = (names) =>
+  [...$("filter-form").elements].some(
+    (el) =>
+      names.includes(el.name) &&
+      (el.type === "checkbox" ? el.checked : el.multiple ? el.selectedOptions.length : el.value !== "")
+  );
 
 /** Populate the form from the query string. Must run after buildControls(),
     since it can only select options that already exist. */
@@ -195,8 +217,11 @@ function buildControls() {
 
   $("facets").innerHTML = FACETS.map(
     ([key, label]) =>
-      `<span class="facet"><label for="f-${key}">${esc(label)}</label>` +
-      `<select id="f-${key}" name="${key}" multiple size="5">` +
+      `<span class="facet"><span class="facet-head">` +
+      `<label for="f-${key}">${esc(label)}</label>` +
+      `<button type="button" class="x" data-clears="${key}" ` +
+      `title="Clear ${esc(label.toLowerCase())}" aria-label="Clear ${esc(label.toLowerCase())}">&times;</button>` +
+      `</span><select id="f-${key}" name="${key}" multiple size="5">` +
       META.facets[key].map((v) => `<option value="${esc(v)}">${esc(v)}</option>`).join("") +
       `</select></span>`
   ).join("");
@@ -218,6 +243,13 @@ function buildControls() {
   form.addEventListener("change", resetPage);
   // No submit button, but Enter in the address input would navigate away.
   form.addEventListener("submit", (e) => e.preventDefault());
+
+  form.addEventListener("click", (e) => {
+    const names = e.target.dataset.clears;
+    if (!names) return;
+    clearFields(names.split(" "));
+    resetPage();
+  });
 
   $("clear").addEventListener("click", () => {
     form.reset();

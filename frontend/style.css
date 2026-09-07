@@ -20,6 +20,10 @@ h1 { font-weight: 400; font-size: 2rem; margin: 1rem 0 0.25rem; }
 .checks label { font-weight: 400; }
 .facet { display: flex; flex-direction: column; gap: 0.25rem; }
 .facet label { font-weight: 600; }
+.facet-head { display: flex; align-items: center; gap: 0.35rem; }
+.x { border: 1px solid #bbb; background: #fff; color: #666; cursor: pointer;
+     line-height: 1; padding: 0.1rem 0.35rem; border-radius: 3px; }
+.x:hover { background: #ddd; color: #000; }
 #addr { min-width: 20rem; }
 
 .count { font-weight: 600; }

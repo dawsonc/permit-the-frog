@@ -30,6 +30,7 @@
 
     <div class="row">
       <div id="flags" class="checks"></div>
+      <button type="button" class="x" data-clears="flags" title="Clear project type" aria-label="Clear project type">&times;</button>
     </div>
 
     <div class="row" id="facets"></div>
@@ -37,14 +38,17 @@
     <div class="row">
       <label for="year-built">Built within 20 years of...</label>
       <select id="year-built" name="year"></select>
+      <button type="button" class="x" data-clears="year" title="Clear year built" aria-label="Clear year built">&times;</button>
 
       <label for="area-min">Living area</label>
       <select id="area-min" name="areaMin"></select>
       to
       <select id="area-max" name="areaMax"></select>
+      <button type="button" class="x" data-clears="areaMin areaMax" title="Clear living area" aria-label="Clear living area">&times;</button>
 
       <label for="since">Only show projects since</label>
       <select id="since" name="since"></select>
+      <button type="button" class="x" data-clears="since" title="Clear projects since" aria-label="Clear projects since">&times;</button>
 
       <button id="clear" type="button">Clear all filters</button>
     </div>
