@@ -12,8 +12,8 @@ const FLAGS = [
   ["hvac", "Other HVAC"],
 ];
 
-// Every one of these is "pick any of the values meta.json lists for this key",
-// so they share one control builder and one predicate.
+// Multi-select facets, whose values come from meta.json rather than being
+// hardcoded — they change whenever the pipeline reruns.
 const FACETS = [
   ["prop_class", "Property type"],
   ["hood", "Neighborhood"],
@@ -55,14 +55,9 @@ let ADDRESSES = [];
 let BY_ADDR = new Map();
 let META = null;
 
-const state = {
-  flags: new Set(),
-  facets: {},          // key -> array of selected values ([] = no constraint)
-  year: null,
-  areaMin: null, areaMax: null,
-  sort: "date", dir: -1,
-  limit: PAGE,
-};
+// Filter values are NOT held here — the form holds them. This is only the
+// table state the form has no control for.
+const state = { sort: "date", dir: -1, limit: PAGE };
 
 const $ = (id) => document.getElementById(id);
 const esc = (s) =>
@@ -74,20 +69,31 @@ const toObjects = ({ cols, rows }) =>
 
 // --- filtering -------------------------------------------------------------
 
-function matches(p) {
-  if (state.flags.size && ![...state.flags].some((f) => p[f] === 1)) return false;
-
-  for (const [key] of FACETS) {
-    const sel = state.facets[key];
-    if (sel.length && !sel.includes(p[key])) return false;
-  }
-
-  if (state.year != null && !(Math.abs(p.year_built - state.year) <= YEAR_SPAN)) return false;
-  if (state.areaMin != null && !(p.res_area >= state.areaMin)) return false;
-  if (state.areaMax != null && !(p.res_area <= state.areaMax)) return false;
-
-  return true;
+/**
+ * Read every filter straight out of the form. Values stay strings on purpose:
+ * res_area has a 0 bucket, and Number("0") is falsy, which would silently turn
+ * "0 sqft" into "no filter". "0" is truthy, and the comparisons below coerce.
+ */
+function readFilters() {
+  const fd = new FormData($("filter-form"));
+  return {
+    flags: fd.getAll("flags"),
+    prop_class: fd.getAll("prop_class"),
+    hood: fd.getAll("hood"),
+    year: fd.get("year"),
+    areaMin: fd.get("areaMin"),
+    areaMax: fd.get("areaMax"),
+  };
 }
+
+/** One line per filter; an empty value means that filter is not applied. */
+const matches = (f) => (p) =>
+  (!f.flags.length || f.flags.some((k) => p[k] === 1)) &&
+  (!f.prop_class.length || f.prop_class.includes(p.prop_class)) &&
+  (!f.hood.length || f.hood.includes(p.hood)) &&
+  (!f.year || Math.abs(p.year_built - f.year) <= YEAR_SPAN) &&
+  (!f.areaMin || p.res_area >= f.areaMin) &&
+  (!f.areaMax || p.res_area <= f.areaMax);
 
 /** Nulls always sort last, whichever direction the column is going. */
 function compare(a, b) {
@@ -106,7 +112,7 @@ const projectOf = (p) =>
 // --- rendering -------------------------------------------------------------
 
 function render() {
-  const rows = PERMITS.filter(matches).sort(compare);
+  const rows = PERMITS.filter(matches(readFilters())).sort(compare);
   const shown = rows.slice(0, state.limit);
 
   $("head").innerHTML = COLUMNS.map(
@@ -135,56 +141,54 @@ function render() {
   $("more").hidden = shown.length >= rows.length;
 }
 
+function resetPage() {
+  state.limit = PAGE;
+  render();
+}
+
 // --- controls --------------------------------------------------------------
 
 /** Distinct non-null values of a column, ascending — the bucket grid actually present. */
 const buckets = (key) =>
   [...new Set(PERMITS.map((p) => p[key]).filter((v) => v != null))].sort((a, b) => a - b);
 
-function fillRange(el, values, fmt, blank) {
+/** Options set by JS must carry no `selected` attribute, or form.reset() keeps them. */
+function fillOptions(el, values, fmt) {
   el.innerHTML =
-    `<option value="">${blank}</option>` +
-    values.map((v) => `<option value="${v}">${fmt(v)}</option>`).join("");
+    `<option value="">any</option>` +
+    values.map((v) => `<option value="${esc(v)}">${esc(fmt(v))}</option>`).join("");
 }
 
 function buildControls() {
   $("flags").innerHTML = FLAGS.map(
     ([f, label]) =>
-      `<label><input type="checkbox" value="${f}"> ${esc(label)}</label>`
+      `<label><input type="checkbox" name="flags" value="${f}"> ${esc(label)}</label>`
   ).join("");
-  $("flags").addEventListener("change", (e) => {
-    state.flags[e.target.checked ? "add" : "delete"](e.target.value);
-    resetPage();
-  });
 
   $("facets").innerHTML = FACETS.map(
     ([key, label]) =>
       `<span class="facet"><label for="f-${key}">${esc(label)}</label>` +
-      `<select id="f-${key}" data-key="${key}" multiple size="5">` +
+      `<select id="f-${key}" name="${key}" multiple size="5">` +
       META.facets[key].map((v) => `<option value="${esc(v)}">${esc(v)}</option>`).join("") +
       `</select></span>`
   ).join("");
-  for (const [key] of FACETS) {
-    state.facets[key] = [];
-    $("f-" + key).addEventListener("change", (e) => {
-      state.facets[key] = [...e.target.selectedOptions].map((o) => o.value);
-      resetPage();
-    });
-  }
 
   const areas = buckets("res_area");
-  fillRange($("year-built"), buckets("year_built"), (v) => v + "s", "any");
-  fillRange($("area-min"), areas, num, "any");
-  fillRange($("area-max"), areas, num, "any");
+  fillOptions($("year-built"), buckets("year_built"), (v) => v + "s");
+  fillOptions($("area-min"), areas, num);
+  fillOptions($("area-max"), areas, num);
 
-  const bind = (id, field) =>
-    $(id).addEventListener("change", (e) => {
-      state[field] = e.target.value === "" ? null : Number(e.target.value);
-      resetPage();
-    });
-  bind("year-built", "year");
-  bind("area-min", "areaMin");
-  bind("area-max", "areaMax");
+  // One listener for every filter control, present and future.
+  const form = $("filter-form");
+  form.addEventListener("change", resetPage);
+  // No submit button, but Enter in the address input would navigate away.
+  form.addEventListener("submit", (e) => e.preventDefault());
+
+  $("clear").addEventListener("click", () => {
+    form.reset();
+    $("addr-note").textContent = "";
+    resetPage();
+  });
 
   $("head").addEventListener("click", (e) => {
     const key = e.target.dataset.key;
@@ -202,8 +206,6 @@ function buildControls() {
     render();
   });
 
-  $("clear").addEventListener("click", clearFilters);
-
   // Wireframe order, not meta.json key order.
   $("cards").innerHTML = ["hp", "panel", "solar"]
     .map((k) => META.headline[k])
@@ -214,22 +216,6 @@ function buildControls() {
         `<div class="card-n">median of ${h.n.toLocaleString()} permits</div></div>`
     )
     .join("");
-}
-
-function resetPage() {
-  state.limit = PAGE;
-  render();
-}
-
-function clearFilters() {
-  state.flags.clear();
-  for (const [key] of FACETS) state.facets[key] = [];
-  Object.assign(state, { year: null, areaMin: null, areaMax: null });
-  document.querySelectorAll("#flags input").forEach((el) => (el.checked = false));
-  document.querySelectorAll("#facets select").forEach((el) => (el.selectedIndex = -1));
-  ["year-built", "area-min", "area-max", "addr"].forEach((id) => ($(id).value = ""));
-  $("addr-note").textContent = "";
-  resetPage();
 }
 
 // --- address prefill -------------------------------------------------------
@@ -250,13 +236,9 @@ function setupAddress() {
   });
 }
 
+/** Seeds the controls, which are the state — so there is nothing else to update. */
 function applyAddress(a) {
-  if (a.prop_class) {
-    state.facets.prop_class = [a.prop_class];
-    for (const o of $("f-prop_class").options) o.selected = o.value === a.prop_class;
-  }
-  state.year = a.year_built;
-  state.areaMin = state.areaMax = a.res_area;
+  for (const o of $("f-prop_class").options) o.selected = o.value === a.prop_class;
   $("year-built").value = a.year_built ?? "";
   $("area-min").value = $("area-max").value = a.res_area ?? "";
 

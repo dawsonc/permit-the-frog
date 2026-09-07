@@ -17,30 +17,38 @@
 <main>
   <p class="lead">See what other people in Somerville are paying</p>
 
-  <section class="filters">
+  <!-- The form IS the filter state: FormData reads it, form.reset() clears it.
+       Every filter control carries a name; the address input deliberately has
+       none, so it resets with the form but never reaches FormData. -->
+  <form id="filter-form" class="filters">
     <div class="row">
+      <label for="addr">Your address</label>
       <input id="addr" type="text" list="addr-list" autocomplete="off"
-             placeholder="Type your address to see similar projects&hellip;">
+             placeholder="Type your address to get started&hellip;">
       <datalist id="addr-list"></datalist>
       <span id="addr-note" class="note"></span>
     </div>
 
     <div class="row">
+      <label>Project type</label>
       <div id="flags" class="checks"></div>
     </div>
 
     <div class="row" id="facets"></div>
 
     <div class="row">
-      <label for="year-built">Built within 20 years of</label>
-      <select id="year-built"></select>
+      <label for="year-built">Year built</label>
+      <select id="year-built" name="year"></select>
+      <span class="note">within 20 years</span>
 
       <label for="area-min">Living area</label>
-      <select id="area-min"></select> to <select id="area-max"></select>
+      <select id="area-min" name="areaMin"></select>
+      to
+      <select id="area-max" name="areaMax"></select>
 
       <button id="clear" type="button">Clear all filters</button>
     </div>
-  </section>
+  </form>
 
   <p id="count" class="count">Loading&hellip;</p>
 
