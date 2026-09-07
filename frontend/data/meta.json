@@ -17,12 +17,12 @@
     },
     "hp": {
       "label": "Heat pumps",
-      "value": 6003,
+      "value": 20250,
       "unit": "",
-      "n": 1474
+      "n": 665
     },
     "panel": {
-      "label": "electrical panel",
+      "label": "Electrical panel",
       "value": 5000,
       "unit": "",
       "n": 3380

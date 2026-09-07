@@ -301,7 +301,7 @@ function buildCards() {
       (h) =>
         `<div class="card"><div class="card-label">${esc(h.label)}</div>` +
         `<div class="card-value">${money(h.value)}${esc(h.unit)}</div>` +
-        `<div class="card-n">median of ${h.n.toLocaleString()} permits</div></div>`
+        `<div class="card-n">citywide median of ${h.n.toLocaleString()} permits</div></div>`
     )
     .join("");
 }

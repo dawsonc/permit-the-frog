@@ -824,6 +824,9 @@ def build_frontend_data(joined: pd.DataFrame, gdb_path: Path, out_dir: Path,
         "year_built": bucket(tagged["year_built"], YEAR_BUCKET),
         "res_area": bucket(tagged["res_area"], AREA_BUCKET),
         "prop_class": label_prop_class(tagged["use_code"]),
+        # Never emitted -- carried only so the headline medians can restrict by
+        # permit family. Dropped just before writing.
+        "trade": tagged["application_type"],
     })
     # Source order is chronological within parcel, so neighbouring rows are
     # usually the same building. Shuffle to break that adjacency, THEN stable-
@@ -834,7 +837,8 @@ def build_frontend_data(joined: pd.DataFrame, gdb_path: Path, out_dir: Path,
     out = out.sample(frac=1, random_state=0).reset_index(drop=True)
     out = out.sort_values("date", kind="stable", na_position="last").reset_index(drop=True)
 
-    permits = {"cols": list(out.columns), "rows": _jsonable(out)}
+    emitted = out.drop(columns=["trade"])
+    permits = {"cols": list(emitted.columns), "rows": _jsonable(emitted)}
     verify_deidentified(permits, scrubber)
 
     addr_out = addresses.assign(
@@ -844,8 +848,11 @@ def build_frontend_data(joined: pd.DataFrame, gdb_path: Path, out_dir: Path,
     )[["addr", "norm", "year_built", "res_area", "stories", "prop_class"]]
 
     cost = out["cost"]
-    def headline(flag: str, label: str, per: pd.Series | None = None) -> dict:
+    def headline(flag: str, label: str, per: pd.Series | None = None,
+                 trade: str | None = None) -> dict:
         rows = out[out[flag] == 1]
+        if trade is not None:
+            rows = rows[rows["trade"] == trade]
         value = (rows["cost"] / per[rows.index]).median() if per is not None else rows["cost"].median()
         return {"label": label, "value": None if pd.isna(value) else round(float(value)),
                 "unit": "/kW" if per is not None else "", "n": int(rows["cost"].notna().sum())}
@@ -859,8 +866,13 @@ def build_frontend_data(joined: pd.DataFrame, gdb_path: Path, out_dir: Path,
         "n_addresses": len(addr_out),
         "headline": {
             "solar": headline("solar", "Rooftop solar", out["kw"]),
-            "hp": headline("hp", "Heat pumps"),
-            "panel": headline("panel", "electrical panel"),
+            # Heat pumps only: an electrical permit for a mini-split prices the
+            # wiring, not the project (median $1,350 vs $20,250 on the building
+            # permit), so blending them understates the job by ~3x. Solar and
+            # panel are left across all trades on purpose -- 98% of costed panel
+            # rows ARE electrical permits, where the wiring is the whole project.
+            "hp": headline("hp", "Heat pumps", trade="Building Permit"),
+            "panel": headline("panel", "Electrical panel"),
         },
         "facets": {
             "prop_class": sorted(out["prop_class"].dropna().unique()),

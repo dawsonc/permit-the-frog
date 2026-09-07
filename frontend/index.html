@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>What should you pay? — Somerville, MA</title>
+  <title>Home Electrification Costs</title>
   <link rel="stylesheet" href="style.css">
 </head>
 <body>
@@ -23,7 +23,7 @@
   <form id="filter-form" class="filters">
     <div class="row">
       <input id="addr" type="text" list="addr-list" autocomplete="off" disabled
-             placeholder="Type your address to get see similar projects&hellip;">
+             placeholder="Type your address to see similar projects&hellip;">
       <datalist id="addr-list"></datalist>
       <span id="addr-note" class="note"></span>
     </div>
@@ -36,20 +36,20 @@
     <div class="row" id="facets"></div>
 
     <div class="row">
-      <label for="year-built">Built within 20 years of...</label>
+      <label for="year-built">Built within 20 years of</label>
       <select id="year-built" name="year"></select>
       <button type="button" class="x" data-clears="year" title="Clear year built" aria-label="Clear year built">&times;</button>
-
+    
       <label for="area-min">Living area</label>
       <select id="area-min" name="areaMin"></select>
       to
       <select id="area-max" name="areaMax"></select>
       <button type="button" class="x" data-clears="areaMin areaMax" title="Clear living area" aria-label="Clear living area">&times;</button>
-
+    
       <label for="since">Only show projects since</label>
       <select id="since" name="since"></select>
       <button type="button" class="x" data-clears="since" title="Clear projects since" aria-label="Clear projects since">&times;</button>
-
+    
       <button id="clear" type="button">Clear all filters</button>
     </div>
   </form>
