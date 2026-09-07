@@ -8,8 +8,8 @@ const FLAGS = [
   ["solar", "Rooftop solar"],
   ["hpwh", "Heat pump water heater"],
   ["ev", "EV charger"],
-  ["hvac", "Other HVAC"],
   ["ess", "Battery storage"],
+  ["hvac", "Other HVAC"],
 ];
 
 // Every one of these is "pick any of the values meta.json lists for this key",
@@ -17,15 +17,23 @@ const FLAGS = [
 const FACETS = [
   ["prop_class", "Property type"],
   ["hood", "Neighborhood"],
-  ["trade", "Permit type"],
-  ["status", "Status"],
 ];
+
+const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun",
+                "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+
+/** "2025-08" -> "Aug 2025". Sorting still uses the raw value, which is ordered. */
+const month = (v) => {
+  if (!v) return "—";
+  const [y, m] = v.split("-");
+  return `${MONTHS[+m - 1]} ${y}`;
+};
 
 const money = (v) => (v == null ? "—" : "$" + Math.round(v).toLocaleString());
 const num = (v) => (v == null ? "—" : v.toLocaleString());
 
 const COLUMNS = [
-  { key: "date", label: "Date" },
+  { key: "date", label: "Date", fmt: month, cls: "nowrap" },
   { key: "_project", label: "Project" },
   { key: "desc", label: "Description", cls: "desc" },
   { key: "cost", label: "Cost", numeric: true, fmt: money },
@@ -35,11 +43,12 @@ const COLUMNS = [
   { key: "prop_class", label: "Property type" },
   { key: "hood", label: "Neighborhood" },
   { key: "contractor", label: "Contractor" },
-  { key: "trade", label: "Permit type" },
-  { key: "status", label: "Status" },
 ];
 
 const PAGE = 200;
+
+// "Year built" is one value; a house matches if it is within this many years.
+const YEAR_SPAN = 20;
 
 let PERMITS = [];
 let ADDRESSES = [];
@@ -49,9 +58,8 @@ let META = null;
 const state = {
   flags: new Set(),
   facets: {},          // key -> array of selected values ([] = no constraint)
-  yearMin: null, yearMax: null,
+  year: null,
   areaMin: null, areaMax: null,
-  q: "",
   sort: "date", dir: -1,
   limit: PAGE,
 };
@@ -74,12 +82,10 @@ function matches(p) {
     if (sel.length && !sel.includes(p[key])) return false;
   }
 
-  if (state.yearMin != null && !(p.year_built >= state.yearMin)) return false;
-  if (state.yearMax != null && !(p.year_built <= state.yearMax)) return false;
+  if (state.year != null && !(Math.abs(p.year_built - state.year) <= YEAR_SPAN)) return false;
   if (state.areaMin != null && !(p.res_area >= state.areaMin)) return false;
   if (state.areaMax != null && !(p.res_area <= state.areaMax)) return false;
 
-  if (state.q && !p.desc.toLowerCase().includes(state.q)) return false;
   return true;
 }
 
@@ -166,10 +172,8 @@ function buildControls() {
     });
   }
 
-  const years = buckets("year_built");
   const areas = buckets("res_area");
-  fillRange($("year-min"), years, (v) => v + "s", "earliest");
-  fillRange($("year-max"), years, (v) => v + "s", "latest");
+  fillRange($("year-built"), buckets("year_built"), (v) => v + "s", "any");
   fillRange($("area-min"), areas, num, "any");
   fillRange($("area-max"), areas, num, "any");
 
@@ -178,15 +182,9 @@ function buildControls() {
       state[field] = e.target.value === "" ? null : Number(e.target.value);
       resetPage();
     });
-  bind("year-min", "yearMin");
-  bind("year-max", "yearMax");
+  bind("year-built", "year");
   bind("area-min", "areaMin");
   bind("area-max", "areaMax");
-
-  $("q").addEventListener("input", (e) => {
-    state.q = e.target.value.trim().toLowerCase();
-    resetPage();
-  });
 
   $("head").addEventListener("click", (e) => {
     const key = e.target.dataset.key;
@@ -216,11 +214,6 @@ function buildControls() {
         `<div class="card-n">median of ${h.n.toLocaleString()} permits</div></div>`
     )
     .join("");
-
-  $("meta").textContent =
-    `${META.n_permits.toLocaleString()} permits, ${META.date_range[0]} to ${META.date_range[1]}. ` +
-    `Somerville permit extract ${META.permit_extract}, assessor ${META.assessor_vintage}. ` +
-    `Generated ${META.generated}.`;
 }
 
 function resetPage() {
@@ -231,10 +224,10 @@ function resetPage() {
 function clearFilters() {
   state.flags.clear();
   for (const [key] of FACETS) state.facets[key] = [];
-  Object.assign(state, { yearMin: null, yearMax: null, areaMin: null, areaMax: null, q: "" });
+  Object.assign(state, { year: null, areaMin: null, areaMax: null });
   document.querySelectorAll("#flags input").forEach((el) => (el.checked = false));
   document.querySelectorAll("#facets select").forEach((el) => (el.selectedIndex = -1));
-  ["year-min", "year-max", "area-min", "area-max", "q", "addr"].forEach((id) => ($(id).value = ""));
+  ["year-built", "area-min", "area-max", "addr"].forEach((id) => ($(id).value = ""));
   $("addr-note").textContent = "";
   resetPage();
 }
@@ -262,14 +255,14 @@ function applyAddress(a) {
     state.facets.prop_class = [a.prop_class];
     for (const o of $("f-prop_class").options) o.selected = o.value === a.prop_class;
   }
-  state.yearMin = state.yearMax = a.year_built;
+  state.year = a.year_built;
   state.areaMin = state.areaMax = a.res_area;
-  $("year-min").value = $("year-max").value = a.year_built ?? "";
+  $("year-built").value = a.year_built ?? "";
   $("area-min").value = $("area-max").value = a.res_area ?? "";
 
   $("addr-note").textContent =
     `${a.prop_class ?? "unknown type"}, built ${a.year_built ? a.year_built + "s" : "?"}, ` +
-    `${a.res_area ? num(a.res_area) + " sqft" : "unknown area"} — filters set to match. Adjust below.`;
+    `${a.res_area ? num(a.res_area) + " sqft" : "unknown area"}`;
   resetPage();
 }
 

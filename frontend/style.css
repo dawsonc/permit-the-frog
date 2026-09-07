@@ -32,4 +32,5 @@ table { border-collapse: collapse; width: 100%; }
 th, td { border-bottom: 1px solid #ddd; padding: 0.35rem 0.5rem; text-align: left; vertical-align: top; }
 th { cursor: pointer; background: #f2f2f2; white-space: nowrap; }
 td.desc { max-width: 32rem; }
+td.nowrap { white-space: nowrap; }
 tbody tr:hover { background: #fafafa; }

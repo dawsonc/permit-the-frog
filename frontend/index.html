@@ -19,31 +19,25 @@
 
   <section class="filters">
     <div class="row">
-      <label for="addr">Your address</label>
       <input id="addr" type="text" list="addr-list" autocomplete="off"
-             placeholder="Type your address to get started&hellip;">
+             placeholder="Type your address to see similar projects&hellip;">
       <datalist id="addr-list"></datalist>
       <span id="addr-note" class="note"></span>
     </div>
 
     <div class="row">
-      <label>Project type</label>
       <div id="flags" class="checks"></div>
     </div>
 
     <div class="row" id="facets"></div>
 
     <div class="row">
-      <label for="year-min">Year built</label>
-      <select id="year-min"></select> to <select id="year-max"></select>
+      <label for="year-built">Built within 20 years of</label>
+      <select id="year-built"></select>
 
       <label for="area-min">Living area</label>
       <select id="area-min"></select> to <select id="area-max"></select>
-    </div>
 
-    <div class="row">
-      <label for="q">Search description</label>
-      <input id="q" type="search" placeholder="e.g. mini split">
       <button id="clear" type="button">Clear all filters</button>
     </div>
   </section>
@@ -58,8 +52,6 @@
   </div>
 
   <p><button id="more" type="button" hidden>Show 200 more</button></p>
-
-  <footer id="meta" class="note"></footer>
 </main>
 
 <script src="app.js"></script>
