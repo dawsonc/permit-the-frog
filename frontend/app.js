@@ -290,6 +290,10 @@ function buildControls() {
     render();
   });
 
+}
+
+/** Needs meta.json only — 1.5 KB, so the header paints without the big files. */
+function buildCards() {
   // Wireframe order, not meta.json key order.
   $("cards").innerHTML = ["hp", "panel", "solar"]
     .map((k) => META.headline[k])
@@ -333,27 +337,49 @@ function applyAddress(a) {
 }
 
 // --- boot ------------------------------------------------------------------
+// All three requests start together — no waterfall — but the page renders in
+// stages as they land, so the 1.5 KB header is not held up by the 3 MB table.
 
-Promise.all(
-  ["data/permits.json", "data/addresses.json", "data/meta.json"].map((u) =>
-    fetch(u).then((r) => {
-      if (!r.ok) throw new Error(`${u}: ${r.status}`);
-      return r.json();
-    })
-  )
-)
-  .then(([permits, addresses, meta]) => {
-    PERMITS = toObjects(permits);
-    ADDRESSES = toObjects(addresses);
+const fetchJson = (u) =>
+  fetch(u).then((r) => {
+    if (!r.ok) throw new Error(`${u}: ${r.status}`);
+    return r.json();
+  });
+
+const metaReq = fetchJson("data/meta.json");
+const permitsReq = fetchJson("data/permits.json");
+const addressesReq = fetchJson("data/addresses.json");
+
+const fail = (err) => {
+  $("count").textContent = `Could not load data: ${err.message}`;
+  console.error(err);
+};
+
+// Stage 1 — headline cards, as soon as meta.json arrives.
+metaReq
+  .then((meta) => {
     META = meta;
-    BY_ADDR = new Map(ADDRESSES.map((a) => [a.addr.toUpperCase(), a]));
+    buildCards();
+  })
+  .catch(fail);
 
+// Stage 2 — the filters and the table. The controls are built in one shot so
+// there is never a half-populated form for applyUrl() to race against.
+Promise.all([metaReq, permitsReq])
+  .then(([, permits]) => {
+    PERMITS = toObjects(permits);
     buildControls();
-    setupAddress();
     applyUrl();
     render();
   })
-  .catch((err) => {
-    $("count").textContent = `Could not load data: ${err.message}`;
-    console.error(err);
-  });
+  .catch(fail);
+
+// Stage 3 — the address box, which is the only thing addresses.json feeds.
+addressesReq
+  .then((addresses) => {
+    ADDRESSES = toObjects(addresses);
+    BY_ADDR = new Map(ADDRESSES.map((a) => [a.addr.toUpperCase(), a]));
+    setupAddress();
+    $("addr").disabled = false;
+  })
+  .catch(fail);
