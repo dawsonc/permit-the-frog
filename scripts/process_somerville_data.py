@@ -89,6 +89,22 @@ PROP_CLASS_OTHER = "Other / mixed use"
 
 DESC_MAX_CHARS = 200
 
+# An electrical permit folds into the building permit it wires when the two are
+# this close. Pair coverage rises steeply to ~14 days (26% of heat-pump building
+# permits at 7d, 35% at 14d) and then flattens -- 30d and 90d both land on the
+# same median -- so a wider window only adds false pairings.
+MERGE_WINDOW_DAYS = 14
+MERGED_TRADE = "Building + Electrical"
+
+# Two permits for one project either split the work or restate it, and the cost
+# ratio says which. A heat pump's electrical permit is a median 6% of its
+# building permit -- genuinely just the wiring, so the two add up. Solar's is a
+# median 59%, and 158 pairs carry *identical* costs: that is the same array
+# filed twice, where adding would double the project. Below this ratio the
+# electrical permit is treated as a sub-scope and summed; at or above it the
+# two are treated as restatements and only the larger is kept.
+SUBSCOPE_RATIO = 0.33
+
 # Street-type words, longest first so "street" wins over "st" in the alternation.
 STREET_SUFFIX_MAP = {
     "street": "st", "avenue": "ave", "road": "rd", "parkway": "pkwy",
@@ -762,6 +778,89 @@ def scrub_descriptions(desc: pd.Series, scrubber: re.Pattern) -> pd.Series:
             .str.replace(r"\s+", " ", regex=True).str.strip().str[:DESC_MAX_CHARS])
 
 
+def merge_same_scope_electrical(tagged: pd.DataFrame) -> pd.DataFrame:
+    """Fold an electrical permit into the building permit it wires.
+
+    A heat pump install files two permits: the building permit prices the job
+    (median $20,250) and the electrical permit prices only the wiring (median
+    $1,350, about 7% of it). Listed separately the electrical row reads as a
+    $1,350 heat pump, which is not a price anyone can act on.
+
+    Three conditions, and the third is the important one:
+      - same parcel, within MERGE_WINDOW_DAYS
+      - exactly one building permit in the cluster (two means two projects --
+        e.g. units 43 and 45 of a two-family, which must not become one row)
+      - the electrical permit introduces NO project type of its own
+
+    Without that last condition a solar building permit would absorb an
+    unrelated panel upgrade, and the combined cost would then be counted in
+    full toward both the solar median and the panel median.
+
+    Descriptions must already be scrubbed and truncated when this runs: each
+    part is capped separately so the ELECTRICAL half is not lost to the cap.
+    """
+    flags = list(FRONTEND_FLAGS)
+    t = tagged.sort_values(["parcel_key", "application_date"]).copy()
+
+    # Rows with no parcel are given a unique key so they can never merge.
+    pk = t["parcel_key"]
+    t["_pk"] = pk.where(pk.notna(), "__solo_" + t.index.astype(str))
+    gap = t.groupby("_pk")["application_date"].diff().dt.days
+    t["_cid"] = t["_pk"].astype(str) + "#" + (
+        (gap.isna() | (gap > MERGE_WINDOW_DAYS)).groupby(t["_pk"]).cumsum().astype(str))
+
+    absorbed = []
+    for _, g in t.groupby("_cid", sort=False):
+        if len(g) < 2:
+            continue
+        b = g[g["application_type"] == "Building Permit"]
+        e = g[g["application_type"] == "Electrical Permit"]
+        if len(b) != 1 or e.empty:
+            continue
+        if (e[flags].max() > b[flags].max()).any():
+            continue
+
+        i = b.index[0]
+        bc = b["estimated_construction_cost"].sum(min_count=1)
+        ec = e["estimated_construction_cost"].sum(min_count=1)
+        t.loc[i, "estimated_construction_cost"] = _merged_cost(bc, ec)
+        t.loc[i, "desc_clean"] = _merged_description(b, e)
+        t.loc[i, "application_type"] = MERGED_TRADE
+        t.loc[i, "solar_kw"] = pd.concat([b["solar_kw"], e["solar_kw"]]).max()
+        absorbed.extend(e.index)
+
+    print(f"  merged {len(absorbed):,} electrical permits into "
+          f"{len(set(t.loc[absorbed, '_cid'])) if absorbed else 0:,} building permits "
+          f"(<={MERGE_WINDOW_DAYS}d, same parcel, same scope)")
+    return t.drop(index=absorbed).drop(columns=["_pk", "_cid"])
+
+
+def _merged_cost(bc: float, ec: float) -> float:
+    """Sum a sub-scope electrical permit; keep the larger of two restatements."""
+    if pd.isna(bc):
+        return ec
+    if pd.isna(ec):
+        return bc
+    if bc > 0 and ec / bc < SUBSCOPE_RATIO:
+        return bc + ec
+    return max(bc, ec)
+
+
+def _merged_description(b: pd.DataFrame, e: pd.DataFrame) -> str:
+    """"BUILDING: ... ($17,696) ELECTRICAL: ... ($1,500)".
+
+    Each permit keeps its own reported cost, so a reader can see how the merged
+    total was reached -- and see for themselves when the two restate each other.
+    """
+    parts = []
+    for label, rows in (("BUILDING", b), ("ELECTRICAL", e)):
+        for _, r in rows.iterrows():
+            cost = r["estimated_construction_cost"]
+            money = f" (${cost:,.0f})" if pd.notna(cost) else ""
+            parts.append(f"{label}: {r['desc_clean']}{money}")
+    return " ".join(parts)
+
+
 def verify_deidentified(payload: dict, scrubber: re.Pattern) -> None:
     """Refuse to write a payload that could be joined back to an address.
 
@@ -810,12 +909,16 @@ def build_frontend_data(joined: pd.DataFrame, gdb_path: Path, out_dir: Path,
     scrubber = build_address_scrubber(addresses)
 
     tagged = joined[joined[list(FRONTEND_FLAGS)].any(axis=1)].copy()
+    # Scrub before merging: scrub_descriptions truncates, and concatenating
+    # first would push the ELECTRICAL half past the cap.
+    tagged["desc_clean"] = scrub_descriptions(tagged["project_description"], scrubber)
+    tagged = merge_same_scope_electrical(tagged)
     # Only what the page actually reads. trade/status/zones/stories/style/
     # attr_level were emitted for years and rendered by nothing; they cost ~12%
     # of the gzipped payload. Add a column back here when the page needs it.
     out = pd.DataFrame({
         "date": tagged["application_date"].dt.strftime("%Y-%m"),
-        "desc": scrub_descriptions(tagged["project_description"], scrubber),
+        "desc": tagged["desc_clean"],
         "cost": tagged["estimated_construction_cost"],
         **{short: tagged[col].astype(int) for col, short in FRONTEND_FLAGS.items()},
         "kw": tagged["solar_kw"],
@@ -823,10 +926,8 @@ def build_frontend_data(joined: pd.DataFrame, gdb_path: Path, out_dir: Path,
         "contractor": tagged["company_name"],
         "year_built": bucket(tagged["year_built"], YEAR_BUCKET),
         "res_area": bucket(tagged["res_area"], AREA_BUCKET),
-        "prop_class": label_prop_class(tagged["use_code"]),
-        # Never emitted -- carried only so the headline medians can restrict by
-        # permit family. Dropped just before writing.
         "trade": tagged["application_type"],
+        "prop_class": label_prop_class(tagged["use_code"]),
     })
     # Source order is chronological within parcel, so neighbouring rows are
     # usually the same building. Shuffle to break that adjacency, THEN stable-
@@ -837,8 +938,7 @@ def build_frontend_data(joined: pd.DataFrame, gdb_path: Path, out_dir: Path,
     out = out.sample(frac=1, random_state=0).reset_index(drop=True)
     out = out.sort_values("date", kind="stable", na_position="last").reset_index(drop=True)
 
-    emitted = out.drop(columns=["trade"])
-    permits = {"cols": list(emitted.columns), "rows": _jsonable(emitted)}
+    permits = {"cols": list(out.columns), "rows": _jsonable(out)}
     verify_deidentified(permits, scrubber)
 
     addr_out = addresses.assign(
@@ -849,10 +949,10 @@ def build_frontend_data(joined: pd.DataFrame, gdb_path: Path, out_dir: Path,
 
     cost = out["cost"]
     def headline(flag: str, label: str, per: pd.Series | None = None,
-                 trade: str | None = None) -> dict:
+                 trade: tuple[str, ...] | None = None) -> dict:
         rows = out[out[flag] == 1]
         if trade is not None:
-            rows = rows[rows["trade"] == trade]
+            rows = rows[rows["trade"].isin(trade)]
         value = (rows["cost"] / per[rows.index]).median() if per is not None else rows["cost"].median()
         return {"label": label, "value": None if pd.isna(value) else round(float(value)),
                 "unit": "/kW" if per is not None else "", "n": int(rows["cost"].notna().sum())}
@@ -871,7 +971,7 @@ def build_frontend_data(joined: pd.DataFrame, gdb_path: Path, out_dir: Path,
             # permit), so blending them understates the job by ~3x. Solar and
             # panel are left across all trades on purpose -- 98% of costed panel
             # rows ARE electrical permits, where the wiring is the whole project.
-            "hp": headline("hp", "Heat pumps", trade="Building Permit"),
+            "hp": headline("hp", "Heat pumps", trade=("Building Permit", MERGED_TRADE)),
             "panel": headline("panel", "Electrical panel"),
         },
         "facets": {

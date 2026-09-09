@@ -36,6 +36,7 @@ const COLUMNS = [
   { key: "_project", label: "Project" },
   { key: "desc", label: "Description", cls: "desc" },
   { key: "cost", label: "Cost", numeric: true, fmt: money },
+  { key: "trade", label: "Permit type", cls: "nowrap" },
   { key: "kw", label: "Size (kW)", numeric: true, fmt: (v) => (v == null ? "—" : v) },
   { key: "year_built", label: "Built", numeric: true, fmt: (v) => (v == null ? "—" : v + "s") },
   { key: "res_area", label: "Area (sqft)", numeric: true, fmt: num },
@@ -301,7 +302,7 @@ function buildCards() {
       (h) =>
         `<div class="card"><div class="card-label">${esc(h.label)}</div>` +
         `<div class="card-value">${money(h.value)}${esc(h.unit)}</div>` +
-        `<div class="card-n">citywide median of ${h.n.toLocaleString()} permits</div></div>`
+        `<div class="card-n">citywide median; n=${h.n.toLocaleString()}</div></div>`
     )
     .join("");
 }
