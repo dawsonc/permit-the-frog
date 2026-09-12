@@ -1,12 +1,13 @@
 {
-  "generated": "2026-09-07",
+  "generated": "2026-09-12",
   "permit_extract": "2026_09_05",
   "assessor_vintage": "CY25_FY25",
   "date_range": [
     "2014-03",
     "2026-09"
   ],
-  "n_permits": 11885,
+  "n_permits": 13144,
+  "n_projects": 11885,
   "n_addresses": 14353,
   "headline": {
     "solar": {
@@ -17,7 +18,7 @@
     },
     "hp": {
       "label": "Heat pumps",
-      "value": 21108,
+      "value": 21200,
       "unit": "",
       "n": 665
     },

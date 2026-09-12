@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import argparse
 import re
+from collections import Counter
 from pathlib import Path
 
 import geopandas as gpd
@@ -89,12 +90,20 @@ PROP_CLASS_OTHER = "Other / mixed use"
 
 DESC_MAX_CHARS = 200
 
-# An electrical permit folds into the building permit it wires when the two are
+# An electrical permit groups with the building permit it wires when the two are
 # this close. Pair coverage rises steeply to ~14 days (26% of heat-pump building
 # permits at 7d, 35% at 14d) and then flattens -- 30d and 90d both land on the
 # same median -- so a wider window only adds false pairings.
-MERGE_WINDOW_DAYS = 14
+GROUP_WINDOW_DAYS = 14
+
+# What a collapsed group calls itself. Emitted only in the medians projection --
+# the page derives the same label from the trades of the rows it is showing.
 MERGED_TRADE = "Building + Electrical"
+
+# Ceiling on how many permits one group may hold, asserted before writing. A
+# group is meant to be a job and its wiring; anything much larger means the
+# clustering has run together work that only shares a parcel and a fortnight.
+MAX_GROUP_SIZE = 6
 
 # Two permits for one project either split the work or restate it, and the cost
 # ratio says which. A heat pump's electrical permit is a median 6% of its
@@ -778,16 +787,21 @@ def scrub_descriptions(desc: pd.Series, scrubber: re.Pattern) -> pd.Series:
             .str.replace(r"\s+", " ", regex=True).str.strip().str[:DESC_MAX_CHARS])
 
 
-def merge_same_scope_electrical(tagged: pd.DataFrame) -> pd.DataFrame:
-    """Fold an electrical permit into the building permit it wires.
+def group_same_scope_electrical(tagged: pd.DataFrame) -> pd.DataFrame:
+    """Stamp an electrical permit and the building permit it wires as one project.
 
     A heat pump install files two permits: the building permit prices the job
     (median $20,250) and the electrical permit prices only the wiring (median
-    $1,350, about 7% of it). Listed separately the electrical row reads as a
-    $1,350 heat pump, which is not a price anyone can act on.
+    $1,350, about 7% of it). Read as two independent rows, the electrical one
+    reads as a $1,350 heat pump, which is not a price anyone can act on.
+
+    Both rows are kept -- each permit is real, with its own date, contractor and
+    description -- and are given a shared group id instead. The page renders the
+    group under one summary row priced by _merged_cost(); collapse_groups() does
+    the same thing for the medians. Nothing is discarded to get there.
 
     Three conditions, and the third is the important one:
-      - same parcel, within MERGE_WINDOW_DAYS
+      - same parcel, within GROUP_WINDOW_DAYS
       - exactly one building permit in the cluster (two means two projects --
         e.g. units 43 and 45 of a two-family, which must not become one row)
       - the electrical permit introduces NO project type of its own
@@ -796,20 +810,21 @@ def merge_same_scope_electrical(tagged: pd.DataFrame) -> pd.DataFrame:
     unrelated panel upgrade, and the combined cost would then be counted in
     full toward both the solar median and the panel median.
 
-    Descriptions must already be scrubbed and truncated when this runs: each
-    part is capped separately so the ELECTRICAL half is not lost to the cap.
+    The ids assigned here are provisional: they run in parcel order, so
+    build_frontend_data renumbers them in emitted order before writing.
     """
     flags = list(FRONTEND_FLAGS)
     t = tagged.sort_values(["parcel_key", "application_date"]).copy()
 
-    # Rows with no parcel are given a unique key so they can never merge.
+    # Rows with no parcel are given a unique key so they can never group.
     pk = t["parcel_key"]
     t["_pk"] = pk.where(pk.notna(), "__solo_" + t.index.astype(str))
     gap = t.groupby("_pk")["application_date"].diff().dt.days
     t["_cid"] = t["_pk"].astype(str) + "#" + (
-        (gap.isna() | (gap > MERGE_WINDOW_DAYS)).groupby(t["_pk"]).cumsum().astype(str))
+        (gap.isna() | (gap > GROUP_WINDOW_DAYS)).groupby(t["_pk"]).cumsum().astype(str))
 
-    absorbed = []
+    t["gid"] = pd.Series(pd.NA, index=t.index, dtype="Int64")
+    n_groups = 0
     for _, g in t.groupby("_cid", sort=False):
         if len(g) < 2:
             continue
@@ -820,19 +835,35 @@ def merge_same_scope_electrical(tagged: pd.DataFrame) -> pd.DataFrame:
         if (e[flags].max() > b[flags].max()).any():
             continue
 
-        i = b.index[0]
-        bc = b["estimated_construction_cost"].sum(min_count=1)
-        ec = e["estimated_construction_cost"].sum(min_count=1)
-        t.loc[i, "estimated_construction_cost"] = _merged_cost(bc, ec)
-        t.loc[i, "desc_clean"] = _merged_description(b, e)
-        t.loc[i, "application_type"] = MERGED_TRADE
-        t.loc[i, "solar_kw"] = pd.concat([b["solar_kw"], e["solar_kw"]]).max()
-        absorbed.extend(e.index)
+        t.loc[b.index.append(e.index), "gid"] = n_groups
+        n_groups += 1
 
-    print(f"  merged {len(absorbed):,} electrical permits into "
-          f"{len(set(t.loc[absorbed, '_cid'])) if absorbed else 0:,} building permits "
-          f"(<={MERGE_WINDOW_DAYS}d, same parcel, same scope)")
-    return t.drop(index=absorbed).drop(columns=["_pk", "_cid"])
+    print(f"  grouped {int(t['gid'].notna().sum()):,} permits into {n_groups:,} projects "
+          f"(<={GROUP_WINDOW_DAYS}d, same parcel, same scope)")
+    return t.drop(columns=["_pk", "_cid"])
+
+
+def collapse_groups(out: pd.DataFrame) -> pd.DataFrame:
+    """One row per project. The medians run on this, never on the emitted rows.
+
+    The page shows every permit; a median must not. Both permits for one heat
+    pump would otherwise land in the heat-pump distribution -- the $20,250 job
+    and the $1,350 wiring as equals -- and roughly halve the answer.
+
+    A group keeps its building permit's row (condition 3 above guarantees its
+    flags already cover the electrical permit's) and takes the group cost, the
+    larger system size, and MERGED_TRADE.
+    """
+    parts = [out[out["gid"].isna()]]
+    for _, g in out[out["gid"].notna()].groupby("gid", sort=False):
+        b = g[g["trade"] == "Building Permit"]
+        e = g[g["trade"] == "Electrical Permit"]
+        row = b.iloc[[0]].copy()
+        row["cost"] = _merged_cost(b["cost"].sum(min_count=1), e["cost"].sum(min_count=1))
+        row["kw"] = g["kw"].max()
+        row["trade"] = MERGED_TRADE
+        parts.append(row)
+    return pd.concat(parts)
 
 
 def _merged_cost(bc: float, ec: float) -> float:
@@ -844,21 +875,6 @@ def _merged_cost(bc: float, ec: float) -> float:
     if bc > 0 and ec / bc < SUBSCOPE_RATIO:
         return bc + ec
     return max(bc, ec)
-
-
-def _merged_description(b: pd.DataFrame, e: pd.DataFrame) -> str:
-    """"BUILDING: ... ($17,696) ELECTRICAL: ... ($1,500)".
-
-    Each permit keeps its own reported cost, so a reader can see how the merged
-    total was reached -- and see for themselves when the two restate each other.
-    """
-    parts = []
-    for label, rows in (("BUILDING", b), ("ELECTRICAL", e)):
-        for _, r in rows.iterrows():
-            cost = r["estimated_construction_cost"]
-            money = f" (${cost:,.0f})" if pd.notna(cost) else ""
-            parts.append(f"{label}: {r['desc_clean']}{money}")
-    return " ".join(parts)
 
 
 def verify_deidentified(payload: dict, scrubber: re.Pattern) -> None:
@@ -873,8 +889,25 @@ def verify_deidentified(payload: dict, scrubber: re.Pattern) -> None:
         bad = [p for p in FORBIDDEN_COL_PARTS if p in col.lower()]
         # "res_area" contains no forbidden part; guard against accidental matches
         # only on whole-word-ish grounds by exempting the known-safe names.
-        if bad and col not in {"res_area", "attr_level"}:
+        # "gid" trips the bare "id" substring. It is exempted here rather than
+        # renamed around the check, because the check is worth confronting: a
+        # gid does link permits to each other, which no other column does. What
+        # makes it safe is that it points nowhere outside the payload -- it is a
+        # dense counter handed out in emitted row order, not derived from the
+        # parcel key -- and the two assertions below are what hold that true.
+        if bad and col not in {"res_area", "attr_level", "gid"}:
             raise AssertionError(f"column {col!r} looks identifying ({bad[0]}) -- refusing to write")
+
+    sizes = Counter(r[idx["gid"]] for r in payload["rows"] if r[idx["gid"]] is not None)
+    if sizes:
+        if sorted(sizes) != list(range(len(sizes))):
+            raise AssertionError("gid is not a dense 0..n-1 counter -- it may carry source order")
+        if min(sizes.values()) < 2:
+            raise AssertionError("a gid appears on one row -- a group of one is not a group")
+        if max(sizes.values()) > MAX_GROUP_SIZE:
+            raise AssertionError(
+                f"a group holds {max(sizes.values())} permits (cap {MAX_GROUP_SIZE}) -- "
+                "the clustering is running unrelated work together")
 
     leaks = [r[idx["desc"]] for r in payload["rows"] if r[idx["desc"]] and scrubber.search(r[idx["desc"]])]
     if leaks:
@@ -909,10 +942,8 @@ def build_frontend_data(joined: pd.DataFrame, gdb_path: Path, out_dir: Path,
     scrubber = build_address_scrubber(addresses)
 
     tagged = joined[joined[list(FRONTEND_FLAGS)].any(axis=1)].copy()
-    # Scrub before merging: scrub_descriptions truncates, and concatenating
-    # first would push the ELECTRICAL half past the cap.
     tagged["desc_clean"] = scrub_descriptions(tagged["project_description"], scrubber)
-    tagged = merge_same_scope_electrical(tagged)
+    tagged = group_same_scope_electrical(tagged)
     # Only what the page actually reads. trade/status/zones/stories/style/
     # attr_level were emitted for years and rendered by nothing; they cost ~12%
     # of the gzipped payload. Add a column back here when the page needs it.
@@ -928,6 +959,9 @@ def build_frontend_data(joined: pd.DataFrame, gdb_path: Path, out_dir: Path,
         "res_area": bucket(tagged["res_area"], AREA_BUCKET),
         "trade": tagged["application_type"],
         "prop_class": label_prop_class(tagged["use_code"]),
+        # Which project a permit belongs to. Null on the great majority of rows,
+        # which are a project of one. Renumbered below.
+        "gid": tagged["gid"],
     })
     # Source order is chronological within parcel, so neighbouring rows are
     # usually the same building. Shuffle to break that adjacency, THEN stable-
@@ -938,7 +972,24 @@ def build_frontend_data(joined: pd.DataFrame, gdb_path: Path, out_dir: Path,
     out = out.sample(frac=1, random_state=0).reset_index(drop=True)
     out = out.sort_values("date", kind="stable", na_position="last").reset_index(drop=True)
 
-    permits = {"cols": list(out.columns), "rows": _jsonable(out)}
+    # Renumber the groups in emitted order. They were handed out in parcel
+    # order, and a gid that ran with the parcels would put back exactly the
+    # adjacency the shuffle above exists to break. Numbered from the top of the
+    # file, a gid tracks the date column instead, which is already public.
+    seen = {}
+    out["gid"] = [None if pd.isna(v) else seen.setdefault(v, len(seen)) for v in out["gid"]]
+
+    # One row per project, for the medians. Derived here and never emitted: the
+    # page gets the permits, and reconstructs the summary row from the group.
+    proj = collapse_groups(out)
+    grouped = proj[proj["gid"].notna()][["gid", "cost"]].sort_values("gid")
+
+    # The group cost is the one thing the page cannot work out for itself --
+    # SUBSCOPE_RATIO lives in this file and nowhere else. Everything else on a
+    # summary row (date, flags, size, trade, property attributes) is derivable
+    # from the member rows, so it is not shipped twice.
+    permits = {"cols": list(out.columns), "rows": _jsonable(out),
+               "groups": {"cols": list(grouped.columns), "rows": _jsonable(grouped)}}
     verify_deidentified(permits, scrubber)
 
     addr_out = addresses.assign(
@@ -950,7 +1001,7 @@ def build_frontend_data(joined: pd.DataFrame, gdb_path: Path, out_dir: Path,
     cost = out["cost"]
     def headline(flag: str, label: str, per: pd.Series | None = None,
                  trade: tuple[str, ...] | None = None) -> dict:
-        rows = out[out[flag] == 1]
+        rows = proj[proj[flag] == 1]
         if trade is not None:
             rows = rows[rows["trade"].isin(trade)]
         value = (rows["cost"] / per[rows.index]).median() if per is not None else rows["cost"].median()
@@ -963,9 +1014,12 @@ def build_frontend_data(joined: pd.DataFrame, gdb_path: Path, out_dir: Path,
         "assessor_vintage": "CY25_FY25",
         "date_range": [out["date"].min(), out["date"].max()],
         "n_permits": len(out),
+        # Permits, then projects: a grouped project is several permits and one
+        # price, and the medians below count it once.
+        "n_projects": len(proj),
         "n_addresses": len(addr_out),
         "headline": {
-            "solar": headline("solar", "Rooftop solar", out["kw"]),
+            "solar": headline("solar", "Rooftop solar", proj["kw"]),
             # Heat pumps only: an electrical permit for a mini-split prices the
             # wiring, not the project (median $1,350 vs $20,250 on the building
             # permit), so blending them understates the job by ~3x. Solar and
@@ -975,6 +1029,8 @@ def build_frontend_data(joined: pd.DataFrame, gdb_path: Path, out_dir: Path,
             "panel": headline("panel", "Electrical panel"),
         },
         "facets": {
+            # Off the emitted rows, not the projects: these drive filters the
+            # page applies per permit, so every value it holds must be listed.
             "prop_class": sorted(out["prop_class"].dropna().unique()),
             "hood": sorted(out["hood"].dropna().unique()),
         },
@@ -986,7 +1042,8 @@ def build_frontend_data(joined: pd.DataFrame, gdb_path: Path, out_dir: Path,
         {"cols": list(addr_out.columns), "rows": _jsonable(addr_out)}, separators=(",", ":")))
     (out_dir / "meta.json").write_text(json.dumps(meta, indent=2))
 
-    print(f"\nFrontend: {len(out):,} tagged permits, {len(addr_out):,} addresses -> {out_dir}")
+    print(f"\nFrontend: {len(out):,} tagged permits in {len(proj):,} projects, "
+          f"{len(addr_out):,} addresses -> {out_dir}")
     print("  " + "  ".join(f"{p.name} {p.stat().st_size / 1e6:.2f} MB"
                            for p in sorted(out_dir.glob("*.json"))))
     print(f"  cost present on {cost.notna().mean():.0%} of rows; "

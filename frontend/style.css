@@ -38,3 +38,15 @@ th { cursor: pointer; background: #f2f2f2; white-space: nowrap; }
 td.desc { max-width: 32rem; }
 td.nowrap { white-space: nowrap; }
 tbody tr:hover { background: #fafafa; }
+
+/* A project that filed more than one permit: a summary row, then the permits
+   themselves indented under it. The block has to read as one project rather
+   than as adjacent rows, because the summary row carries no price — the
+   sub-rows are the only place a cost appears. */
+tr.grp td { background: #f4f6f8; }
+tr.grp td:first-child, tr.sub td:first-child { border-left: 3px solid #9ab; }
+tr.sub td { color: #555; border-bottom-color: #eee; }
+tr.sub td:first-child { padding-left: 1.5rem; }
+tr.sub td:first-child::before { content: "\21b3\a0"; color: #999; }
+/* tbody tr:hover sets the background on the row, which tr.grp td overrides. */
+tbody tr.grp:hover td { background: #eef1f4; }

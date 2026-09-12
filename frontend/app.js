@@ -51,6 +51,7 @@ const PAGE = 200;
 const YEAR_SPAN = 20;
 
 let PERMITS = [];
+let UNITS = [];
 let ADDRESSES = [];
 let BY_ADDR = new Map();
 let META = null;
@@ -109,11 +110,103 @@ function compare(a, b) {
 const projectOf = (p) =>
   FLAGS.filter(([f]) => p[f] === 1).map(([, label]) => label).join(", ");
 
+// --- grouping --------------------------------------------------------------
+// One project can file more than one permit: a heat pump install prices the job
+// on a building permit and the wiring on an electrical permit, and the wiring
+// permit read on its own looks like a $1,350 heat pump. The pipeline stamps
+// such permits with a shared `gid`. They stay separate rows here — each permit
+// is real, with its own date, contractor and description — and the page renders
+// them as sub-rows under a summary row it derives from them. That summary row
+// carries no price: the costs in the table are the ones the permits state, and
+// they are all on the sub-rows.
+//
+// A "unit" is what the table lists: one lone permit, or one group.
+//   { row, members, subs }
+// `row` is what the sort and the cell renderer see, `members` what the filters
+// see, `subs` the rows to indent underneath (empty for a lone permit).
+
+/** Building permit first — it prices the job — then the rest by date. */
+const bySubRow = (a, b) =>
+  (a.trade === "Building Permit" ? 0 : 1) - (b.trade === "Building Permit" ? 0 : 1) ||
+  String(a.date).localeCompare(String(b.date));
+
+/**
+ * The summary row for a group, shaped exactly like a permit so that compare(),
+ * matches() and the cell renderer need to know nothing about groups.
+ *
+ * Everything here is derived from the members except `cost`: whether the two
+ * permits split the work or restate it is a judgement made in
+ * scripts/process_somerville_data.py, and its answer arrives in the `groups`
+ * block rather than being reimplemented here.
+ *
+ * That `cost` is never rendered — rowHtml() blanks it — but it is kept, and
+ * is not dead: it is what orders the group when the table is sorted by cost.
+ * Dropping it would sort every grouped project last in both directions.
+ */
+function summaryOf(members, cost) {
+  // Property attributes are identical across a group — same parcel — so the
+  // building permit's stand for the project. A contractor that differs is
+  // visible on the sub-row that reports it.
+  const row = { ...members[0], cost, desc: `${members.length} permits` };
+  row.date = members.reduce((a, p) => (p.date && p.date < a ? p.date : a), members[0].date);
+  for (const [f] of FLAGS) row[f] = members.some((p) => p[f] === 1) ? 1 : 0;
+  const kw = members.map((p) => p.kw).filter((v) => v != null);
+  row.kw = kw.length ? Math.max(...kw) : null;
+  // "Building Permit" + "Electrical Permit" -> "Building + Electrical".
+  row.trade = [...new Set(members.map((p) => p.trade))]
+    .map((t) => t.replace(/ Permit$/, ""))
+    .join(" + ");
+  return row;
+}
+
+function buildUnits(permits, groupCost) {
+  const byGid = new Map();
+  const units = [];
+  for (const p of permits) {
+    if (p.gid == null) {
+      units.push({ row: p, members: [p], subs: [] });
+    } else if (byGid.has(p.gid)) {
+      byGid.get(p.gid).push(p);
+    } else {
+      // members and subs are the same array on purpose: a group's members ARE
+      // the rows shown under it. `row` is filled in once the group is complete.
+      const members = [p];
+      byGid.set(p.gid, members);
+      units.push({ members, subs: members });
+    }
+  }
+  for (const u of units) {
+    if (!u.subs.length) continue;
+    u.subs.sort(bySubRow);
+    u.row = summaryOf(u.subs, groupCost.get(u.subs[0].gid));
+  }
+  return units;
+}
+
 // --- rendering -------------------------------------------------------------
 
+/** One <tr>. `cls` marks a summary row or a sub-row; a lone permit gets neither. */
+const rowHtml = (p, cls) =>
+  `<tr${cls ? ` class="${cls}"` : ""}>` +
+  COLUMNS.map((c) => {
+    // A group's cost is the project's, not any permit's, so it is not shown:
+    // the sub-rows below carry the prices that were actually filed. It still
+    // orders the group when the table is sorted by cost (see summaryOf).
+    const raw =
+      cls === "grp" && c.key === "cost" ? null :
+      c.key === "_project" ? projectOf(p) : p[c.key];
+    const text = c.fmt ? c.fmt(raw) : raw == null ? "—" : raw;
+    return `<td${c.cls ? ` class="${c.cls}"` : ""}>${esc(text)}</td>`;
+  }).join("") +
+  "</tr>";
+
 function render() {
-  const rows = PERMITS.filter(matches(readFilters())).sort(compare);
-  const shown = rows.slice(0, state.limit);
+  const f = matches(readFilters());
+  // A group is kept whole: if any of its permits matches, the project shows
+  // with all of them. Matching on the members rather than on the summary row
+  // matters for "since", whose summary date is the earliest of the group.
+  const units = UNITS.filter((u) => u.members.some(f)).sort((a, b) => compare(a.row, b.row));
+  const shown = units.slice(0, state.limit);
 
   $("head").innerHTML = COLUMNS.map(
     (c) =>
@@ -123,22 +216,21 @@ function render() {
   ).join("");
 
   $("body").innerHTML = shown
-    .map(
-      (p) =>
-        "<tr>" +
-        COLUMNS.map((c) => {
-          const raw = c.key === "_project" ? projectOf(p) : p[c.key];
-          const text = c.fmt ? c.fmt(raw) : raw == null ? "—" : raw;
-          return `<td${c.cls ? ` class="${c.cls}"` : ""}>${esc(text)}</td>`;
-        }).join("") +
-        "</tr>"
+    .map((u) =>
+      u.subs.length
+        ? rowHtml(u.row, "grp") + u.subs.map((p) => rowHtml(p, "sub")).join("")
+        : rowHtml(u.row)
     )
     .join("");
 
-  $("count").textContent = rows.length
-    ? `Showing ${shown.length.toLocaleString()} of ${rows.length.toLocaleString()} matching permits`
+  // Projects, then permits: the table is a list of projects, and a reader who
+  // counted the rows on screen should be able to see where the difference went.
+  const permits = units.reduce((n, u) => n + u.members.length, 0);
+  $("count").textContent = units.length
+    ? `Showing ${shown.length.toLocaleString()} of ${units.length.toLocaleString()} ` +
+      `matching projects (${permits.toLocaleString()} permits)`
     : "No permits match these filters.";
-  $("more").hidden = shown.length >= rows.length;
+  $("more").hidden = shown.length >= units.length;
 
   syncAreaBounds();
 
@@ -369,6 +461,7 @@ metaReq
 Promise.all([metaReq, permitsReq])
   .then(([, permits]) => {
     PERMITS = toObjects(permits);
+    UNITS = buildUnits(PERMITS, new Map(permits.groups.rows));
     buildControls();
     applyUrl();
     render();
