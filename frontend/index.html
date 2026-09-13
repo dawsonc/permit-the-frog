@@ -12,18 +12,19 @@
   <h1>How much should you be paying for <b>home electrification</b>?</h1>
   <p class="sub">in Somerville, MA</p>
   <div id="cards" class="cards"></div>
+  <div>
+    <p>Made by <a href="https://dawzylla.com">Charles Dawson</a> using data from the <a href="https://data.somervillema.gov/Government-Finance/Applications-for-Permits-and-Licenses/nneb-s3f7/about_data">City of Somerville</a>.</p>
+  </div>
 </header>
 
 <main>
-  <p class="lead">See what other people in Somerville are paying</p>
-
   <!-- The form IS the filter state: FormData reads it, form.reset() clears it.
        Every filter control carries a name; the address input deliberately has
        none, so it resets with the form but never reaches FormData. -->
   <form id="filter-form" class="filters">
     <div class="row">
       <input id="addr" type="text" list="addr-list" autocomplete="off" disabled
-             placeholder="Type your address to see similar projects&hellip;">
+             placeholder="Type your address to see projects in similar houses&hellip;">
       <datalist id="addr-list"></datalist>
       <span id="addr-note" class="note"></span>
     </div>
